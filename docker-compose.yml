@@ -1,0 +1,35 @@
+services:
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      # mock | dev | prod —— mock 下不调任何外部 API，全链路可离线跑通
+      APP_ENV: ${APP_ENV:-mock}
+      VLM_PROVIDER: ${VLM_PROVIDER:-mock}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DB_PATH: /data/adaudit.db
+      CHECKPOINT_DB_PATH: /data/checkpoints.db
+      CHROMA_PATH: /data/chroma
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: ./web
+    ports:
+      - "3000:3000"
+    environment:
+      # 容器内前端把 /api/* 反代到 api 服务
+      NEXT_PUBLIC_API_BASE: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy

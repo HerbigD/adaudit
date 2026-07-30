@@ -1,0 +1,33 @@
+[project]
+name = "adaudit-api"
+version = "0.1.0"
+description = "AdAudit v2 — 置信度感知的食品广告品类审计 Agent（FastAPI + LangGraph）"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "langgraph>=1.0",
+    "langgraph-checkpoint-sqlite>=3.0",
+    "aiosqlite>=0.20",
+]
+
+[project.optional-dependencies]
+# W5 才需要：装上后 vectorstore 自动从 fallback 切到 Chroma
+vector = ["chromadb>=0.5"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# 编译后的图与 AsyncSqliteSaver 连接绑定在一个 event loop 上，
+# 所以整轮测试共用一个 loop（生产环境本来就是单 loop）
+asyncio_default_test_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "session"
+testpaths = ["tests"]

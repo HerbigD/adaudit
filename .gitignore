@@ -1,0 +1,30 @@
+# 数据与产物
+data/*.db
+data/*.db-*
+data/chroma/
+data/uploads/
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node / Next
+node_modules/
+.next/
+out/
+next-env.d.ts
+
+# 环境
+.env
+.env.local
+
+# 编辑器 / 系统
+.DS_Store
+.vscode/
+.idea/
