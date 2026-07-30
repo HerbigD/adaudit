@@ -86,6 +86,7 @@ def _reason(state: AuditState) -> str:
                 "timeout": "搜索超时",
                 "budget_exceeded": "搜索预算耗尽",
                 "conflict": "证据冲突",
+                "degraded_evidence": "证据降级（无可用营养读数）",
                 "invalid_output": "感知输出非法",
                 "error": "取证异常",
             }.get(t.fallback_reason, t.fallback_reason)
