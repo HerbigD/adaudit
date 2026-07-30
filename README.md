@@ -6,7 +6,12 @@
 > 高置信直出 / 低置信人工复核（双选项 original vs prediction）→ 人工结果回流 →
 > 批次品类结构分析报告
 
-当前状态：**W1–W2 骨架已完成并可运行**（mock 模式下全链路跑通，含 interrupt 挂起 / resume / 回流 / 报告）。
+当前状态：**Day 5 完成** —— 骨架 + `classify_initial` + 条件边① + 粒度自适应 + **搜索取证链路**
+（多语言查询构造 / 候选筛选 / 单位换算 / LLM 抽取与降级 / 冲突判定 / `search_status` 状态机）。
+mock 模式下六条路径全链路跑通。测试 **118 passed**。数据域：南亚四国（IN / BD / PK / LK）。
+
+> `api/data/taxonomy.json` 已是 **v1.0-codebook**（逐条对照原始 codebook，33 条全部 `confirmed=true`）。
+> v0.9-draft 时期的差异清单已归档于 `docs/archive/taxonomy_conflicts_resolved.md`。
 
 ---
 
@@ -14,6 +19,9 @@
 
 ```bash
 cp .env.example .env          # 默认 APP_ENV=mock，不需要任何 API key
+
+# 激活虚拟环境
+source /Users/d/.venv/bin/activate
 
 # 后端
 cd api && pip install -e . && uvicorn main:app --reload --port 8000
@@ -34,6 +42,10 @@ docker compose up --build     # web:3000 / api:8000，数据卷挂 ./data
 |---|---|
 | 任意（如 `ad.png`） | 高置信 → `direct` 快路径，一次 VLM 调用直出 |
 | 含 `low`（如 `low-cereal.png`） | 低置信 + 有品牌 → 缓存/搜索取证 → 重裁决 |
+| 含 `parent`（如 `parent-cereal.png`） | 叶子低 + 父类高 → **粒度自适应**按父类输出，取证后回落叶子 |
+| 含 `conflict`（如 `conflict-yoghurt.png`） | 搜索返回矛盾营养数据 → 证据冲突 → 人工 → supersede |
+| 含 `serving`（如 `serving-cereal.png`） | 抽到 per-serving 读数但缺份量 → `degraded`，阈值上调后仍需人工 |
+| 含 `degraded`（如 `degraded-snack.png`） | 页面无营养面板 → 降级证据 |
 | 含 `nobrand`（如 `nobrand-ad.png`） | 低置信 + 无锚点 → 直接 `human_review` 挂起 |
 
 同一个产品第二次上传会**命中缓存直接出结果**（demo 里"记忆生效的哇时刻"）。
@@ -144,6 +156,8 @@ adaudit/
 | GET | `/api/batches/{id}` | 批次状态 + 聚合统计 |
 | POST | `/api/batches/{id}/report` | 生成 LLM 报告 |
 | GET | `/api/batches/{id}/trend` | 跨批次看板曲线 |
+| GET | `/api/taxonomy` | 两级级联选择器数据（taxonomy.json 的第二份产物） |
+| GET | `/api/taxonomy/tokens` | prompt 块 token 计量（验收项 ≤2000） |
 | GET | `/api/graph` | 导出状态机 mermaid |
 
 ### SSE 事件协议（前端只认这 6 种）
@@ -174,17 +188,32 @@ event: done         data: {"final":{...},"route":"direct_verified","human_choice
 5. **事件总线 + 重放**：上传后立即跳转，SSE 迟连不丢前几条事件。
 6. **向量库可降级**：没装 `chromadb` 时 `vectorstore` 自动切到本地相似度实现，骨架照样跑通；
    `pip install -e ".[vector]"` 后无需改任何调用方代码。
+7. **taxonomy 单一事实来源**：`api/data/taxonomy.json` 是**分类数据**的唯一来源，代码里不硬编码分类。
+   但 **HFSS 归属是叠加其上的政策判断**，用显式判定表 `taxonomy.HFSS_VERDICTS`（一类一行结论 +
+   一句依据），不从名称字符串猜 —— 早期的名称正则会把"不含甜味粉剂"的茶咖判成高糖。
+   判定表的覆盖性由加载期校验强制：taxonomy 新增编号而判定表没写，启动即报错。
+8. **缓存写入护栏 + provenance 单向棘轮**：auto 档案要过六道条件才写；人工裁定按
+   `(brand, product_name)` 唯一键 supersede，`auto` 永远覆盖不了 `human_verified`。
+9. **mock 结果不可能变成指标**：每条结果带 `adapter` 标记，`eval.runner` 前后两道断言，
+   默认配置直接拒跑；批次页检测到 mock adapter 会挂黄条。
 
 ---
 
 ## 测试
 
 ```bash
-cd api && pytest -q      # 18 passed：边逻辑单测 + 三条路径集成测试（mock VLM）
+cd api && pytest -q      # 61 passed
 ```
 
-覆盖：条件边①三路分流、条件边②两路分流、粒度自适应展示、33 类校验、
-direct 快路径、search 慢路径、human 路径 interrupt 挂起 → resume → 回流。
+| 文件 | 覆盖 |
+|---|---|
+| `test_edges.py` | 条件边①三路 / 条件边②两路分流、叶子未定不得直出 |
+| `test_hierarchy_confidence.py` | 9 组层级置信度组合（含 4 组阈值边界）+ 候选保留 + 历史码 22→32 |
+| `test_taxonomy.py` | taxonomy.json 加载校验、prompt token 预算、`*` 标记自洽、级联数据 |
+| `test_cache_guardrails.py` | 六道写入护栏 + provenance 棘轮 + supersede |
+| `test_eval_guard.py` | eval runner 的 mock 前置/后置断言 |
+| `test_graph_flow.py` | 四条路径端到端 + trace 完整性 + adapter 标记 |
+| `test_search_chain.py` | Day5 §8 七组：失败态/冲突判定/单位换算/降级/预算/多语言/域名表 |
 
 ---
 
@@ -193,7 +222,9 @@ direct 快路径、search 慢路径、human 路径 interrupt 挂起 → resume �
 | 周 | 交付物 | 当前状态 |
 |---|---|---|
 | W1–2 | repo + FastAPI + SSE + Next.js 骨架 + SQLite 建表 | ✅ 已完成 |
-| W3 | 真实 VLM 初分类（接 `GEMINI_API_KEY` 即可切换） | 适配层已就位，待接 key 验证 |
+| W3 / Day3 | taxonomy.json 接入 + classify_initial + 条件边① + 粒度自适应 + 三项加固 | ✅ 已完成（`docs/daily/day3.md`） |
+| Day3 补 | taxonomy 升级到 v1.0-codebook + HFSS 判定表 | ✅ 已完成（`docs/daily/day3-taxonomy-update.md`） |
+| W4 / Day5 | 搜索取证链路（多语言查询 / 筛选 / 抽取 / 降级 / 冲突 / 状态机） | ✅ 已完成（`docs/daily/day5.md`）；`_search_once` 待接 MCP |
 | W4 | MCP 联网搜索（`services/search.py::_search_once`）+ 真实 LLM 重裁决 | 预算/超时/兜底框架已就位 |
 | W5 | Chroma 混合检索 + few-shot 记忆 | 接口已定，装 `[vector]` 即切换 |
 | W6 | **红线：interrupt + 复核队列 + 裁定 resume** | ✅ 已串通（mock 下） |

@@ -45,10 +45,30 @@ class Settings(BaseSettings):
     # 子类低但父类高 → 粒度自适应输出（按父类展示）
     general_fallback_threshold: float = 0.80
 
-    # ---------- 搜索预算（方案 §7 成本控制） ----------
+    # ---------- 搜索预算（方案 §7 / Day5 §4） ----------
     search_max_queries: int = 3             # 每张广告最多几次查询
     search_timeout_s: float = 10.0          # 单次查询超时
-    search_retries: int = 1                 # 预算内重试次数
+    search_total_timeout_s: float = 25.0    # 整链路上限（含抽取）
+    search_retries: int = 1                 # 预算内重试次数（仅超时/网络错误）
+    search_candidates_topk: int = 3         # 进 LLM 抽取的候选数
+    search_hits_per_query: int = 5          # 每条查询取 top-N 进筛选
+    max_evidence: int = 5                   # 一次取证最多产出几条 Evidence
+    degraded_threshold_bump: float = 0.05   # degraded 时 route_2 阈值上调
+    conflict_relative_gap: float = 0.50     # 冲突判定：相对偏差阈值
+    default_country: str | None = None      # 推不出国家时的域名表兜底（None = 只用 _global）
+
+    # ---------- 数据驱动词表（新增国家只改 JSON） ----------
+    sources_by_country_path: str = str(
+        Path(__file__).resolve().parent / "data" / "sources_by_country.json"
+    )
+    category_terms_path: str = str(
+        Path(__file__).resolve().parent / "data" / "category_terms.json"
+    )
+
+    # ---------- Taxonomy ----------
+    # 单一事实来源，代码里不另造分类数据
+    taxonomy_path: str = str(Path(__file__).resolve().parent / "data" / "taxonomy.json")
+    taxonomy_prompt_token_budget: int = 2000
 
     # ---------- 存储 ----------
     db_path: str = str(DATA_DIR / "adaudit.db")

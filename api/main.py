@@ -14,7 +14,7 @@ import db
 from config import settings
 from graph import builder
 from routers import audits, batches, review
-from services import cache_store, memory
+from services import cache_store, memory, taxonomy
 
 
 @asynccontextmanager
@@ -58,8 +58,31 @@ async def health() -> dict[str, Any]:
             "general_fallback": settings.general_fallback_threshold,
         },
         "search_budget": settings.search_max_queries,
+        "taxonomy": {
+            "version": taxonomy.load().version,
+            "confirmed_ratio": taxonomy.cascade()["confirmed_ratio"],
+            **taxonomy.token_report(),
+        },
         "cache": cache_store.stats(),
         "memory": memory.stats(),
+    }
+
+
+@meta.get("/taxonomy")
+async def get_taxonomy() -> dict[str, Any]:
+    """两级级联选择器数据源（taxonomy.json 的第二份产物）。"""
+    return taxonomy.cascade()
+
+
+@meta.get("/taxonomy/tokens")
+async def taxonomy_tokens() -> dict[str, Any]:
+    """验收项：taxonomy prompt 块 token 数 ≤ 预算。"""
+    report = taxonomy.token_report()
+    budget = settings.taxonomy_prompt_token_budget
+    return {
+        **report,
+        "budget": budget,
+        "within_budget": report["taxonomy_block"] <= budget,
     }
 
 

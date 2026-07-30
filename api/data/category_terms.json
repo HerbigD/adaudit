@@ -1,0 +1,81 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "updated": "2026-07-30",
+    "note": "本土高频品类词：这些词本身携带判定信息，构造查询时**不剥离**（Day5 §3 规则 5）。新增国家只加词表。",
+    "why": "例如 'toned milk' 是印度低脂奶术语，直接决定 5/19 判定；剥掉它查询就退化成通用 milk。"
+  },
+
+  "keep_terms": {
+    "_global": [
+      "instant noodles",
+      "toned milk",
+      "double toned milk",
+      "full cream",
+      "skimmed",
+      "low fat",
+      "no added sugar",
+      "diet",
+      "zero sugar",
+      "whole wheat",
+      "atta",
+      "maida"
+    ],
+    "IN": [
+      "toned milk",
+      "double toned milk",
+      "instant noodles",
+      "namkeen",
+      "bhujia",
+      "savoury mixture",
+      "mixture",
+      "ghee",
+      "paneer",
+      "dahi",
+      "lassi",
+      "atta",
+      "maida",
+      "poha",
+      "upma"
+    ],
+    "BD": ["muri", "chanachur", "shemai", "dal", "biscuit", "instant noodles"],
+    "PK": ["nihari", "namkeen", "rusk", "desi ghee", "instant noodles"],
+    "LK": ["kottu", "string hopper", "papadam", "coconut milk", "instant noodles"]
+  },
+
+  "stopwords": {
+    "_note": "英文营销修饰词，构造查询时剥离。非英文修饰词随 OCR 原文保留（搜索引擎容错）。",
+    "en": [
+      "new",
+      "limited",
+      "edition",
+      "special",
+      "offer",
+      "sale",
+      "buy",
+      "now",
+      "free",
+      "combo",
+      "deal",
+      "discount",
+      "exclusive",
+      "mega",
+      "super saver",
+      "value pack",
+      "pack of",
+      "best seller",
+      "bestseller",
+      "hot",
+      "sale now"
+    ]
+  },
+
+  "notes_for_labelling": {
+    "_note": "标注与 demo 时留意的南亚品类归属（Day5 §9 末段）",
+    "toned / double-toned milk": "5 vs 19 的本土术语，看脂肪含量",
+    "Maggi 类方便面": "13（调味/油炸即食米饭面条）",
+    "bhujia / mixture / namkeen": "17（加盐加脂咸味零食）",
+    "甜奶茶粉冲调": "25（含糖饮料），不是 29",
+    "Ayurvedic 饮品": "按配料与营养判，不因营销话术改判"
+  }
+}

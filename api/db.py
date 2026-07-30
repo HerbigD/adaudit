@@ -56,10 +56,18 @@ CREATE TABLE IF NOT EXISTS product_cache (
   verdict_json   TEXT,
   source_urls    TEXT,
   hit_count      INTEGER DEFAULT 0,
+  -- auto = 搜索自动沉淀；human_verified = 人工裁定确认过（单向棘轮，auto 不能覆盖它）
+  provenance     TEXT NOT NULL DEFAULT 'auto',
+  revision       INTEGER NOT NULL DEFAULT 1,
+  superseded_at  TEXT,
+  superseded_by  TEXT,          -- 触发 supersede 的 audit_id
   created_at     TEXT,
   last_hit_at    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cache_brand ON product_cache(brand);
+-- 唯一键：brand + product_name（大小写不敏感）。supersede 走这把键 upsert，不做版本分叉。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_key
+  ON product_cache(lower(brand), lower(product_name));
 
 -- eval 评测集（人工标注 + 人工修正回流都进这里）
 CREATE TABLE IF NOT EXISTS eval_samples (
@@ -100,10 +108,23 @@ def cursor() -> Iterator[sqlite3.Cursor]:
         conn.close()
 
 
+# 建表后补加的列：老库直接 ALTER，不用重建（骨架期数据可丢，但流程要跑通）
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("product_cache", "provenance", "TEXT NOT NULL DEFAULT 'auto'"),
+    ("product_cache", "revision", "INTEGER NOT NULL DEFAULT 1"),
+    ("product_cache", "superseded_at", "TEXT"),
+    ("product_cache", "superseded_by", "TEXT"),
+]
+
+
 def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        for table, column, decl in MIGRATIONS:
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         conn.commit()
     finally:
         conn.close()

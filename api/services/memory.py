@@ -27,14 +27,13 @@ def remember(
     rejected: Classification | None = None,
 ) -> str:
     """一次写两处：eval 集（标注扩充）+ 记忆库（向量化）。"""
-    is_pair = any(
-        corrected.specific_code in pair and (rejected and rejected.specific_code in pair)
-        for pair in taxonomy.CONFUSING_PAIRS
+    is_pair = taxonomy.is_confusing_pair(
+        corrected.specific_code, rejected.specific_code if rejected else None
     )
     sample_id = add_eval_sample(
         image_path=image_path,
         gold_general=corrected.general_category,
-        gold_specific=str(corrected.specific_code),
+        gold_specific=str(corrected.specific_code) if corrected.specific_code else None,
         source="human_feedback",
         is_confusing_pair=is_pair,
     )
@@ -45,9 +44,9 @@ def remember(
             documents=[doc or image_path],
             metadatas=[
                 {
-                    "corrected_code": corrected.specific_code,
+                    "corrected_code": corrected.specific_code or -1,
                     "corrected_general": corrected.general_category,
-                    "rejected_code": rejected.specific_code if rejected else -1,
+                    "rejected_code": (rejected.specific_code if rejected else None) or -1,
                     "reasoning": corrected.reasoning[:300],
                     "brand": corrected.brand or "",
                     "product_name": corrected.product_name or "",

@@ -1,6 +1,6 @@
 /** REST 封装。前端一律走同源 /api/*（next.config.mjs 里 rewrite 到 FastAPI）。 */
 
-import type { Audit, Batch, SpecificCategory, TrendPoint } from "./types";
+import type { Audit, Batch, TaxonomyCascade, TrendPoint } from "./types";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { cache: "no-store", ...init });
@@ -28,8 +28,7 @@ export const api = {
 
   queue: () => req<Audit[]>("/api/review/queue"),
   reviewDetail: (id: string) => req<Audit>(`/api/review/${id}`),
-  taxonomy: () =>
-    req<{ generals: string[]; specifics: SpecificCategory[] }>("/api/review/taxonomy"),
+  taxonomy: () => req<TaxonomyCascade>("/api/taxonomy"),
   decide: (id: string, choice: string, manual_code?: number) =>
     req<{ status: string; ingested: string[] }>(`/api/review/${id}/decide`, {
       method: "POST",

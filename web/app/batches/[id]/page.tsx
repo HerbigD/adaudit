@@ -74,6 +74,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
         <Stat
           label="缓存命中"
           value={`${s.cache.total_hits} 次 / ${s.cache.products} 档案`}
+          hint={`人工核验 ${s.cache.human_verified} · 被覆盖 ${s.cache.superseded}`}
         />
       </div>
 
@@ -93,7 +94,22 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
             <Row label="采纳 original" value={pct(s.original_adopted_rate)} />
             <Row label="采纳 prediction" value={pct(s.prediction_adopted_rate)} />
             <Row label="路由分布" value={JSON.stringify(s.route_distribution)} />
+            <Row
+              label="仅定到父类（细类待定）"
+              value={`${s.parent_level_count} 条 / ${pct(s.parent_level_share)}`}
+            />
+            <Row label="taxonomy 版本" value={s.taxonomy_version} />
           </div>
+          {(() => {
+            const tainted = Object.keys(s.adapters ?? {}).filter(
+              (a) => a.startsWith("mock") || a === "rule-fallback"
+            );
+            return tainted.length > 0 ? (
+              <p className="mt-3 rounded-lg bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                本批次含 mock / rule-fallback 产出（{tainted.join("、")}），指标不可用于对外汇报。
+              </p>
+            ) : null;
+          })()}
         </div>
         <TrendChart points={trend} />
       </div>
@@ -123,11 +139,12 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="card">
       <div className="label">{label}</div>
       <div className="mt-1 text-xl font-semibold">{value}</div>
+      {hint && <div className="mt-0.5 text-[11px] text-muted">{hint}</div>}
     </div>
   );
 }

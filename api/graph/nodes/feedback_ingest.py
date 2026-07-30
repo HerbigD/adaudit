@@ -2,6 +2,11 @@
 
 放图内而不是图外的理由（方案 §5）：写在图内就进了 trace，
 且 interrupt resume 后在同一事务语境完成闭环。
+
+Day 3 加固 2：人工裁定对同产品的 `auto` 档案执行 **supersede**。
+实现方式：按 `(lower(brand), lower(product_name))` 唯一键 upsert，
+`provenance` 升为 `human_verified`、`revision` 自增、`superseded_at/by` 记录来源 audit，
+**不做版本分叉**（理由见 services/cache_store.py 模块 docstring）。
 """
 
 from __future__ import annotations
@@ -29,11 +34,22 @@ async def feedback_ingest(state: AuditState) -> dict:
         memory.remember(state.get("ad_image", ""), final, rejected=rejected)
         wrote += ["eval 集", "修正记忆库"]
 
-        # 3) 产品知识缓存库：有品牌锚点且有证据才沉淀
-        if final.brand and final.product_name and evidence:
-            cache_store.upsert(final.brand, final.product_name, evidence, final)
-            wrote.append("产品缓存库")
+        # 3) 产品知识缓存库：人工裁定优先级最高，覆盖同产品的 auto 档案
+        cache_result = {"action": "skipped", "reason": "缺少 brand/product_name 唯一键"}
+        if final.brand and final.product_name:
+            if final.specific_code is None:
+                cache_result = {"action": "skipped", "reason": "叶子未定，不入库"}
+            else:
+                cache_result = cache_store.supersede_with_human_verdict(
+                    final.brand,
+                    final.product_name,
+                    evidence,
+                    final,
+                    audit_id=state.get("audit_id"),
+                )
+                wrote.append(f"产品缓存库（{cache_result['action']}）")
 
+        t.extra = {"cache_write": cache_result, "human_choice": state.get("human_choice")}
         t.summary = "已回流：" + " + ".join(wrote)
         await events.emit_log("feedback_ingest", t.summary)
         return {"trace": [t]}

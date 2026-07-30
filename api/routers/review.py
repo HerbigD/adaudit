@@ -28,8 +28,10 @@ def _reason(row: dict[str, Any]) -> str:
     reason = _reason_from_trace(row.get("trace"))
     if reason == "置信度不足":
         initial = row.get("initial") or {}
-        if initial and not initial.get("name_or_brand_legible", True):
+        if initial and not initial.get("name_brand_identifiable", True):
             return "无法识别产品名/品牌"
+        if initial.get("leaf_vs_parent") == "parent":
+            return "父类已定、细类待定"
     return reason
 
 
@@ -58,14 +60,8 @@ async def queue() -> list[dict[str, Any]]:
 
 @router.get("/taxonomy")
 async def get_taxonomy() -> dict[str, Any]:
-    """33 类级联选择器的数据源。"""
-    return {
-        "generals": taxonomy.GENERAL_CATEGORIES,
-        "specifics": [
-            {"code": c.code, "name": c.name, "general": c.general}
-            for c in taxonomy.SPECIFIC_CATEGORIES
-        ],
-    }
+    """33 类级联选择器的数据源（与 GET /api/taxonomy 同一份数据）。"""
+    return taxonomy.cascade()
 
 
 @router.get("/{audit_id}")
@@ -87,7 +83,7 @@ async def decide(audit_id: str, decision: Decision) -> dict[str, Any]:
         raise HTTPException(404, "audit 不存在")
     if row["status"] != "pending_human":
         raise HTTPException(409, f"当前状态 {row['status']} 不可裁定")
-    if decision.choice == "manual" and not taxonomy.is_valid(decision.manual_code):
+    if decision.choice == "manual" and taxonomy.normalize(decision.manual_code) is None:
         raise HTTPException(400, "manual_code 不在 33 类内")
 
     result = await runner.resume(audit_id, decision.choice, decision.manual_code)

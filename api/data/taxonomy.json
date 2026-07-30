@@ -1,0 +1,306 @@
+{
+  "meta": {
+    "version": "1.0-codebook",
+    "updated": "2026-07-30",
+    "source": "General Category.txt（原始 codebook，逐条对照重写，全部 confirmed=true）",
+    "structure_note": "12 大类 / 33 细类；编号 1–34，22 并入 32，保留原始编号作数据层 stable_code，前端展示名称。",
+    "usage": "Day 2 起由 services/taxonomy.py 加载，生成两份产物：① classify_initial 的 system prompt 文本块；② 前端两级级联选择器数据（GET /api/taxonomy）。替换本文件后须重跑 hfss_codes() 派生与 token 计量断言。"
+  },
+  "general_categories": [
+    { "id": 1, "name_en": "Grains and starches", "name_zh": "谷物与淀粉类" },
+    { "id": 2, "name_en": "Fruits and vegetables", "name_zh": "水果与蔬菜" },
+    { "id": 3, "name_en": "Dairy and alternatives", "name_zh": "乳制品及替代品" },
+    { "id": 4, "name_en": "Meats and alternatives", "name_zh": "肉类及替代品" },
+    { "id": 5, "name_en": "Snacks and desserts", "name_zh": "零食与甜点" },
+    { "id": 6, "name_en": "Meals and prepared foods", "name_zh": "餐食与预制食品" },
+    { "id": 7, "name_en": "Beverages", "name_zh": "饮料" },
+    { "id": 8, "name_en": "Oil", "name_zh": "油脂" },
+    { "id": 9, "name_en": "Fast food (burgers) and restaurants", "name_zh": "快餐（汉堡类）与餐厅" },
+    { "id": 10, "name_en": "Baby foods", "name_zh": "婴幼儿食品" },
+    { "id": 11, "name_en": "Recipe additions", "name_zh": "烹饪添加物" },
+    { "id": 12, "name_en": "Vitamin", "name_zh": "维生素与补充剂" }
+  ],
+  "specific_categories": [
+    {
+      "stable_code": 1, "parent_id": 1, "confirmed": true,
+      "name_zh": "无添加谷物主食与原味饼干", "name_en": "Breads, rice, noodles without additive, plain starch products; plain biscuits and crackers",
+      "description_zh": "无添加的面包、米饭、面条及原味淀粉制品；原味饼干和薄脆",
+      "key_dimensions": ["添加剂", "加工方式"],
+      "evidence_needed": ["配料表"],
+      "confusable_with": [13, 14]
+    },
+    {
+      "stable_code": 2, "parent_id": 1, "confirmed": true,
+      "name_zh": "低糖高纤维谷物", "name_en": "Low sugar and high fibre cereals",
+      "description_zh": "低糖且高纤维的谷物制品（麦片、谷物棒等）；与高糖低纤维类（12）仅凭外观不可区分，依赖营养成分表",
+      "key_dimensions": ["糖", "纤维"],
+      "evidence_needed": ["糖含量", "膳食纤维含量"],
+      "confusable_with": [12]
+    },
+    {
+      "stable_code": 12, "parent_id": 1, "confirmed": true,
+      "name_zh": "高糖和/或低纤维谷物", "name_en": "High sugar and/or low fibre cereals",
+      "description_zh": "高糖或低纤维的谷物制品（甜味早餐谷物等）；与低糖高纤维类（2）为首要视觉混淆对",
+      "key_dimensions": ["糖", "纤维"],
+      "evidence_needed": ["糖含量", "膳食纤维含量"],
+      "confusable_with": [2]
+    },
+    {
+      "stable_code": 13, "parent_id": 1, "confirmed": true,
+      "name_zh": "调味/油炸即食米饭面条", "name_en": "Flavoured/fried instant rice and noodle",
+      "description_zh": "调味或油炸的即食米饭、方便面等",
+      "key_dimensions": ["调味", "油炸", "钠"],
+      "evidence_needed": ["钠含量", "脂肪含量"],
+      "confusable_with": [1, 23]
+    },
+    {
+      "stable_code": 14, "parent_id": 1, "confirmed": true,
+      "name_zh": "甜味烘焙与高脂咸味烘焙", "name_en": "Sweet breads, cakes, muffins, sweet biscuits, high fat savoury biscuits, pies and pastries; sweet sticky rice or rice pudding",
+      "description_zh": "甜面包、蛋糕、玛芬、甜饼干、高脂咸饼干、派与酥皮点心；甜糯米或米布丁",
+      "key_dimensions": ["糖", "脂"],
+      "evidence_needed": ["糖含量", "脂肪含量"],
+      "confusable_with": [1, 16]
+    },
+    {
+      "stable_code": 3, "parent_id": 2, "confirmed": true,
+      "name_zh": "无添加水果及水果制品", "name_en": "Fruits and fruit products without additives",
+      "description_zh": "无添加剂的水果及水果制品；与蔬菜类（4）的区分是水果 vs 蔬菜，不是添加剂有无",
+      "key_dimensions": ["水果 vs 蔬菜", "添加剂"],
+      "evidence_needed": ["配料表"],
+      "confusable_with": [4, 18]
+    },
+    {
+      "stable_code": 4, "parent_id": 2, "confirmed": true,
+      "name_zh": "无添加蔬菜及蔬菜制品、原味海苔", "name_en": "Vegetables and vegetable products without additives, plain seaweed",
+      "description_zh": "无添加剂的蔬菜及蔬菜制品；原味海苔",
+      "key_dimensions": ["水果 vs 蔬菜", "添加剂"],
+      "evidence_needed": ["配料表"],
+      "confusable_with": [3]
+    },
+    {
+      "stable_code": 5, "parent_id": 3, "confirmed": true,
+      "name_zh": "低脂奶/酸奶、低脂奶酪及其替代品", "name_en": "Milks and yoghurts (low fat), cheese (low fat) and their alternatives",
+      "description_zh": "低脂/脱脂奶与酸奶、低脂奶酪及其替代品（含植物基替代）；与全脂类（19）包装高度混淆，依赖脂肪含量",
+      "key_dimensions": ["脂肪含量"],
+      "evidence_needed": ["脂肪含量"],
+      "confusable_with": [19]
+    },
+    {
+      "stable_code": 19, "parent_id": 3, "confirmed": true,
+      "name_zh": "全脂奶/酸奶、高脂奶酪及其替代品", "name_en": "Full cream milks and yoghurts, high fat cheese and their alternatives",
+      "description_zh": "全脂奶与酸奶、高脂奶酪及其替代品",
+      "key_dimensions": ["脂肪含量"],
+      "evidence_needed": ["脂肪含量"],
+      "confusable_with": [5]
+    },
+    {
+      "stable_code": 30, "parent_id": 3, "confirmed": true,
+      "name_zh": "婴幼儿配方奶粉", "name_en": "Baby and toddler milk formulae",
+      "description_zh": "婴幼儿及幼儿配方奶粉（注意：植物奶等替代品归 5/19，不归此类）",
+      "key_dimensions": ["婴配"],
+      "evidence_needed": [],
+      "confusable_with": [5, 19]
+    },
+    {
+      "stable_code": 6, "parent_id": 4, "confirmed": true,
+      "name_zh": "肉禽豆蛋与原味无盐坚果", "name_en": "Meat and alternatives, poultry, legumes, tofu, eggs, raw unsalted nuts",
+      "description_zh": "肉及替代品、禽类、豆类、豆腐、蛋、原味无盐坚果（未腌制加工）",
+      "key_dimensions": ["是否腌制加工"],
+      "evidence_needed": ["配料表"],
+      "confusable_with": [15, 17]
+    },
+    {
+      "stable_code": 15, "parent_id": 4, "confirmed": true,
+      "name_zh": "盐腌加工肉制品", "name_en": "Processed meats and alternatives (preserved in salt)",
+      "description_zh": "盐腌保存的加工肉制品及替代品（火腿、香肠、培根等）",
+      "key_dimensions": ["是否腌制加工", "钠"],
+      "evidence_needed": ["钠含量", "配料表"],
+      "confusable_with": [6]
+    },
+    {
+      "stable_code": 9, "parent_id": 5, "confirmed": true,
+      "name_zh": "基于核心食物的健康零食", "name_en": "Healthy snacks based on core foods",
+      "description_zh": "以核心食物（水果、坚果、酸奶等）为基础的健康零食；与 16/17/21 的区分在原料与糖盐脂",
+      "key_dimensions": ["原料基底", "糖", "盐", "脂"],
+      "evidence_needed": ["配料表", "糖含量", "钠含量"],
+      "confusable_with": [16, 17, 21]
+    },
+    {
+      "stable_code": 16, "parent_id": 5, "confirmed": true,
+      "name_zh": "甜味零食", "name_en": "Sweet snack foods",
+      "description_zh": "甜味零食（甜饼干、甜糕点等）；与咸味零食（17）包装形态相近，为视觉混淆对",
+      "key_dimensions": ["糖", "脂"],
+      "evidence_needed": ["糖含量", "脂肪含量"],
+      "confusable_with": [17, 14, 20]
+    },
+    {
+      "stable_code": 17, "parent_id": 5, "confirmed": true,
+      "name_zh": "加盐/加脂咸味零食", "name_en": "Savoury snack foods with added salt or fat",
+      "description_zh": "添加盐或脂肪的咸味零食（薯片、膨化食品等）",
+      "key_dimensions": ["盐", "脂"],
+      "evidence_needed": ["钠含量", "脂肪含量"],
+      "confusable_with": [16]
+    },
+    {
+      "stable_code": 20, "parent_id": 5, "confirmed": true,
+      "name_zh": "冰淇淋、冰品与甜点", "name_en": "Ice cream, iced confection and desserts",
+      "description_zh": "冰淇淋、冰品 confection 与甜点",
+      "key_dimensions": ["糖", "脂"],
+      "evidence_needed": ["糖含量", "脂肪含量"],
+      "confusable_with": [16]
+    },
+    {
+      "stable_code": 21, "parent_id": 5, "confirmed": true,
+      "name_zh": "巧克力与糖果", "name_en": "Chocolate and candy",
+      "description_zh": "巧克力与糖果",
+      "key_dimensions": ["糖"],
+      "evidence_needed": ["糖含量"],
+      "confusable_with": [16, 9]
+    },
+    {
+      "stable_code": 8, "parent_id": 6, "confirmed": true,
+      "name_zh": "低脂/低盐餐食", "name_en": "Low fat/salt meals (includes frozen or packaged meals, soups, sandwiches, salads, steamed buns)",
+      "description_zh": "低脂/低盐餐食：速冻或包装餐、汤、三明治、沙拉、包子等；与高脂高盐类（23）为视觉混淆对",
+      "key_dimensions": ["脂肪", "盐"],
+      "evidence_needed": ["脂肪含量", "钠含量"],
+      "confusable_with": [23]
+    },
+    {
+      "stable_code": 23, "parent_id": 6, "confirmed": true,
+      "name_zh": "高脂/高盐餐食", "name_en": "High fat/salt meals (includes prepared meals with higher content of fats or salts)",
+      "description_zh": "脂肪或盐含量较高的预制餐食",
+      "key_dimensions": ["脂肪", "盐"],
+      "evidence_needed": ["脂肪含量", "钠含量"],
+      "confusable_with": [8, 13]
+    },
+    {
+      "stable_code": 24, "parent_id": 6, "confirmed": true,
+      "name_zh": "其他高脂/高盐制品（酱料类）", "name_en": "Other high fat/salt products (like meat/fish/bean pastes, high fat sauces)",
+      "description_zh": "其他高脂/高盐制品，如肉酱、鱼酱、豆酱、高脂酱料",
+      "key_dimensions": ["脂肪", "盐"],
+      "evidence_needed": ["脂肪含量", "钠含量"],
+      "confusable_with": [23, 27]
+    },
+    {
+      "stable_code": 11, "parent_id": 7, "confirmed": true,
+      "name_zh": "瓶装水", "name_en": "Bottled water (include unflavoured mineral and soda waters)",
+      "description_zh": "瓶装水，含无调味的矿泉水与苏打水（不是含糖饮料！HFSS 判定为健康向）",
+      "key_dimensions": [],
+      "evidence_needed": [],
+      "confusable_with": [25]
+    },
+    {
+      "stable_code": 18, "parent_id": 7, "confirmed": true,
+      "name_zh": "果汁/果汁饮料", "name_en": "Fruit juice/drinks",
+      "description_zh": "果汁与果汁饮料；与含糖饮料（25）的区分在果汁含量与配料表",
+      "key_dimensions": ["糖", "果汁含量"],
+      "evidence_needed": ["配料表", "糖含量"],
+      "confusable_with": [25, 3]
+    },
+    {
+      "stable_code": 25, "parent_id": 7, "confirmed": true,
+      "name_zh": "含糖饮料", "name_en": "Sugar sweetened drinks",
+      "description_zh": "含糖饮料（碳酸、调味茶饮、甜奶粉冲调类等）；与瓶装水（11）包装相似、与果汁（18）界限在配料",
+      "key_dimensions": ["含糖量"],
+      "evidence_needed": ["糖含量", "配料表"],
+      "confusable_with": [11, 18, 29]
+    },
+    {
+      "stable_code": 26, "parent_id": 7, "confirmed": true,
+      "name_zh": "酒精饮料", "name_en": "Alcohol",
+      "description_zh": "酒精饮料",
+      "key_dimensions": ["酒精"],
+      "evidence_needed": [],
+      "confusable_with": [25]
+    },
+    {
+      "stable_code": 29, "parent_id": 7, "confirmed": true,
+      "name_zh": "茶与咖啡（不含甜味粉剂冲调）", "name_en": "Tea and coffee (excluding sweetened powder-based)",
+      "description_zh": "茶与咖啡；甜味粉剂冲调类归含糖饮料（25），与 25 的区分依赖配料表",
+      "key_dimensions": ["含糖量"],
+      "evidence_needed": ["配料表", "糖含量"],
+      "confusable_with": [25]
+    },
+    {
+      "stable_code": 7, "parent_id": 8, "confirmed": true,
+      "name_zh": "高不饱和脂肪油脂与低脂咸味酱", "name_en": "Oils high in mono- or polyunsaturated fats, and low fat savoury sauces",
+      "description_zh": "富含单不饱和/多不饱和脂肪的食用油，以及低脂咸味酱；按脂肪酸类型判定",
+      "key_dimensions": ["脂肪酸类型"],
+      "evidence_needed": ["脂肪酸组成"],
+      "confusable_with": []
+    },
+    {
+      "stable_code": 10, "parent_id": 10, "confirmed": true,
+      "name_zh": "婴幼儿食品", "name_en": "Baby foods",
+      "description_zh": "婴幼儿食品（辅食、婴幼儿零食等；配方奶粉归 30）",
+      "key_dimensions": [],
+      "evidence_needed": [],
+      "confusable_with": [30]
+    },
+    {
+      "stable_code": 27, "parent_id": 11, "confirmed": true,
+      "name_zh": "烹饪添加物", "name_en": "Recipe additions (including soup cubes, oils, dried herbs and seasonings)",
+      "description_zh": "烹饪添加物：汤料块、烹调油、干香草与调味料等",
+      "key_dimensions": [],
+      "evidence_needed": [],
+      "confusable_with": [24]
+    },
+    {
+      "stable_code": 28, "parent_id": 12, "confirmed": true,
+      "name_zh": "维生素/矿物质及膳食补充剂", "name_en": "Vitamin/mineral or other dietary supplements",
+      "description_zh": "维生素、矿物质及其他膳食补充剂",
+      "key_dimensions": [],
+      "evidence_needed": [],
+      "confusable_with": []
+    },
+    {
+      "stable_code": 31, "parent_id": 9, "confirmed": true,
+      "name_zh": "快餐（健康选项）", "name_en": "Fast food (healthier options)",
+      "description_zh": "快餐品牌广告中的健康选项（沙拉、低卡套餐等）；与常规快餐（32）的区分在主推餐品",
+      "key_dimensions": ["健康选项"],
+      "evidence_needed": [],
+      "confusable_with": [32]
+    },
+    {
+      "stable_code": 32, "parent_id": 9, "confirmed": true,
+      "name_zh": "快餐（常规，含不健康选项）", "name_en": "Fast food (general, includes unhealthy options)",
+      "description_zh": "快餐常规餐品广告（汉堡、炸鸡等，含不健康选项）",
+      "key_dimensions": ["健康选项"],
+      "evidence_needed": [],
+      "confusable_with": [31],
+      "merge_note": "原编号 22 已并入 32，历史数据遇到 22 时按 32 处理"
+    },
+    {
+      "stable_code": 33, "parent_id": 9, "confirmed": true,
+      "name_zh": "快餐餐厅（广告中无食品饮料）", "name_en": "Fast-food restaurant (NO foods or drinks advertised)",
+      "description_zh": "仅出现快餐餐厅品牌/门店/促销信息，广告中无具体食品或饮料",
+      "key_dimensions": ["仅餐厅无食品"],
+      "evidence_needed": [],
+      "confusable_with": [31, 32, 34]
+    },
+    {
+      "stable_code": 34, "parent_id": 9, "confirmed": true,
+      "name_zh": "本地餐厅", "name_en": "Local restaurant",
+      "description_zh": "本地餐厅（非连锁快餐的餐饮场所广告）",
+      "key_dimensions": [],
+      "evidence_needed": [],
+      "confusable_with": [33]
+    }
+  ],
+  "confusing_pairs": [
+    { "pair": [2, 12], "dimension": "糖/纤维", "note": "谷物类首要混淆对，eval 重点" },
+    { "pair": [5, 19], "dimension": "脂肪", "note": "奶与酸奶脂肪，eval 重点" },
+    { "pair": [8, 23], "dimension": "脂/盐", "note": "餐食脂盐，eval 重点" },
+    { "pair": [16, 17], "dimension": "甜/咸", "note": "零食甜咸，eval 重点" },
+    { "pair": [18, 25], "dimension": "果汁含量/配料", "note": "果汁饮料 vs 含糖饮料" },
+    { "pair": [25, 29], "dimension": "糖", "note": "甜奶粉冲调 vs 纯茶咖，依赖配料表" }
+  ],
+  "prompt_generation": {
+    "system_prompt_block_guidance": [
+      "输出全部 33 个 stable_code 的清单：编号 + 中文名 + 关键区分维度，总量约 1500 token，全量进 system prompt，不做 RAG",
+      "对每个细类标注 evidence_needed 非空的条目：提示模型这些类别的最终判定依赖营养/配料数据，视觉不确定时应给低置信度并保留名称/品牌提取",
+      "附上 confusing_pairs 清单：要求模型在这些对上必须显式输出 confidence 且不强行二选一",
+      "输出契约：product_name / brand / name_brand_identifiable / general_category / specific_category(stable_code) / confidence(0-1) / reasoning / leaf_vs_parent（粒度自适应标记）"
+    ]
+  }
+}

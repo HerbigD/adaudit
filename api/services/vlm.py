@@ -2,6 +2,9 @@
 
 provider 由 config.settings.vlm_provider 切换：mock / gemini / qwen / openai。
 结构化输出校验放在这里（而不是节点里）—— 校验失败的重试不需要走图的调度。
+
+每个 adapter 都必须声明 `adapter` 名，并写进 Classification.adapter：
+mock 与规则兜底的输出因此在 trace 里可识别，eval runner 据此拒绝跑批。
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from graph.state import Classification
 from services import taxonomy
 
 MAX_PARSE_RETRIES = 2
+
+MOCK_ADAPTERS = {"mock-vlm", "rule-fallback", "mock-llm"}
 
 
 class VLMError(RuntimeError):
@@ -48,20 +53,88 @@ def _extract_json(text: str) -> dict[str, Any]:
     return json.loads(raw[start : end + 1])
 
 
-def parse_classification(text: str, *, source: str, model: str | None) -> Classification:
-    """结构化校验：JSON 合法 + specific_code 在 33 类内，否则抛错由调用方重试。"""
+def parse_classification(
+    text: str, *, source: str, model: str | None, adapter: str
+) -> Classification:
+    """结构化校验：JSON 合法 + 编号在 33 类内 + 粒度标记自洽。
+
+    校验失败抛 VLMError，由 `BaseVLM.classify` 就地重试（不走图的调度）。
+    """
     data = _extract_json(text)
-    code = data.get("specific_code")
-    if isinstance(code, str) and code.isdigit():
-        code = int(code)
-    if not taxonomy.is_valid(code):
-        raise VLMError(f"specific_code 非法: {code!r}")
-    data["specific_code"] = code
-    general = taxonomy.general_of(code)
-    # 大类以细类为准回填，避免模型自造大类名
-    data["general_category"] = general
-    data.setdefault("general_confidence", data.get("specific_confidence", 0.5))
-    return Classification(**{**data, "source": source, "model": model})
+    tx = taxonomy.load()
+
+    code = tx.normalize(data.get("specific_code"))
+    level = data.get("leaf_vs_parent") or ("leaf" if code is not None else "parent")
+
+    if level == "leaf" and code is None:
+        raise VLMError(f"leaf 级输出但 specific_code 非法: {data.get('specific_code')!r}")
+
+    gid = data.get("general_id")
+    if code is not None:
+        gid = tx.specifics[code].parent_id
+    if gid not in tx.generals:
+        raise VLMError(f"general_id 非法: {gid!r}")
+
+    payload = {
+        "product_name": data.get("product_name"),
+        "brand": data.get("brand"),
+        "name_brand_identifiable": bool(
+            data.get("name_brand_identifiable", data.get("name_or_brand_legible", True))
+        ),
+        "ad_language": (data.get("ad_language") or "en").lower()[:5],
+        "country": (data.get("country") or None),
+        "general_id": gid,
+        "specific_code": code,
+        "candidate_codes": data.get("candidate_codes") or [],
+        "leaf_vs_parent": level,
+        "specific_confidence": float(data.get("specific_confidence", 0.0)),
+        "general_confidence": float(
+            data.get("general_confidence", data.get("specific_confidence", 0.0))
+        ),
+        "reasoning": data.get("reasoning", ""),
+        "evidence_refs": data.get("evidence_refs") or [],
+        "conflict": bool(data.get("conflict", False)),
+        "source": source,
+        "model": model,
+        "adapter": adapter,
+    }
+    return Classification(**payload)
+
+
+def apply_granularity_policy(c: Classification) -> Classification:
+    """粒度自适应（方案 §2 末段）：叶子置信低但父类置信高 → 按父类输出。
+
+    与 prompt 里的第 4 条规则互为保险：模型自觉降级最好，没降级则在这里兜底降级，
+    这样 UI 的"确定层级 / 待定层级"和 eval 的粒度统计都有一致的判定口径。
+    """
+    if c.leaf_vs_parent == "parent":
+        return c
+    if (
+        c.specific_confidence < settings.direct_threshold
+        and c.general_confidence >= settings.general_fallback_threshold
+    ):
+        cands = list(c.candidate_codes)
+        if c.specific_code is not None and c.specific_code not in cands:
+            cands.insert(0, c.specific_code)
+        # 补上同父类里与它构成混淆对的兄弟，给下游搜索一个明确的"在争什么"
+        if c.specific_code is not None:
+            s = taxonomy.get(c.specific_code)
+            for sib in (s.confusable_with if s else ()):
+                if sib not in cands and taxonomy.general_id_of(sib) == c.general_id:
+                    cands.append(sib)
+        note = (
+            f"（粒度自适应：父类可定为「{c.general_category}」，"
+            f"叶子在 {'/'.join(f'[{x}]' for x in cands)} 之间未定，需营养证据）"
+        )
+        return c.model_copy(
+            update={
+                "specific_code": None,
+                "leaf_vs_parent": "parent",
+                "candidate_codes": cands,
+                "reasoning": (c.reasoning or "") + note,
+            }
+        )
+    return c
 
 
 # --------------------------------------------------------------------------- #
@@ -69,6 +142,7 @@ def parse_classification(text: str, *, source: str, model: str | None) -> Classi
 # --------------------------------------------------------------------------- #
 class BaseVLM(ABC):
     name: str = "base"
+    adapter: str = "base"
 
     @abstractmethod
     async def _raw_classify(self, image_path: str, system_prompt: str) -> str:
@@ -82,7 +156,10 @@ class BaseVLM(ABC):
         for attempt in range(MAX_PARSE_RETRIES + 1):
             try:
                 text = await self._raw_classify(image_path, prompt)
-                return parse_classification(text, source="vlm", model=self.name)
+                c = parse_classification(
+                    text, source="vlm", model=self.name, adapter=self.adapter
+                )
+                return apply_granularity_policy(c)
             except Exception as exc:  # noqa: BLE001 — 校验失败就地重试
                 last = exc
                 await asyncio.sleep(0.3 * (attempt + 1))
@@ -90,38 +167,68 @@ class BaseVLM(ABC):
 
 
 class MockVLM(BaseVLM):
-    """W1–W2 用：不调外部 API，按文件名 hash 稳定产出一个结果。
+    """W1–W3 用：不调外部 API，按文件名 hash 稳定产出结果。
 
-    文件名里带 'low' → 低置信（走搜索链路）；带 'nobrand' → 无法识别品牌（直接转人工）。
-    这样 demo 和集成测试可以确定性地覆盖三条路由。
+    文件名约定（demo 与集成测试靠它确定性覆盖每条路径）：
+      含 `nobrand` → 无法识别名称/品牌 → 条件边① 直接转人工
+      含 `parent`  → 叶子低置信 + 父类高置信 → 粒度自适应按父类输出
+      含 `low`     → 低置信 + 有品牌 → 取证路径
+      其他         → 高置信 → 快路径直出
     """
 
     name = "mock-vlm"
+    adapter = "mock-vlm"
 
     async def _raw_classify(self, image_path: str, system_prompt: str) -> str:
         await asyncio.sleep(0.6)
+        tx = taxonomy.load()
         stem = Path(image_path).stem.lower()
         rng = random.Random(stem)
-        code = rng.choice([2, 12, 5, 19, 8, 23, 25, 32])
+
+        # 优先从混淆对里挑，保证 mock 数据能打到 eval 关注的那几对
+        pair = rng.choice(list(tx.confusing_pairs))
+        code = pair[0]
+        gid = tx.specifics[code].parent_id
+
+        lang, country = "en", "IN"
         if "nobrand" in stem:
-            conf, legible, brand, pname = 0.42, False, None, None
+            spec, gen, ident, brand, pname = 0.42, 0.55, False, None, None
+        elif "conflict" in stem:
+            # 品牌名带 Conflict → mock 搜索返回互相矛盾的营养数据 → 条件边②转人工
+            spec, gen, ident = 0.55, 0.86, True
+            brand, pname = "ConflictBrand", "Disputed Yoghurt 200g"
+            code, gid, pair = 5, 3, (5, 19)          # 落在 5/19 对上，冲突维度 = fat
+        elif "degraded" in stem:
+            spec, gen, ident = 0.55, 0.86, True
+            brand, pname = "DegradedBrand", "Crispy Snack 45g"
+            lang, country = "bn", "BD"
+        elif "serving" in stem:
+            spec, gen, ident = 0.55, 0.86, True
+            brand, pname = "ServingBrand", "Morning Cereal 375g"
+        elif "parent" in stem:
+            spec, gen, ident = 0.48, 0.93, True
+            brand, pname = "MockBrand", "Mock Cereal 500g"
         elif "low" in stem:
-            conf, legible = 0.55, True
+            spec, gen, ident = 0.55, 0.85, True
             brand, pname = "MockBrand", "Mock Crunchy Cereal 500g"
         else:
-            conf, legible = 0.93, True
+            spec, gen, ident = 0.93, 0.97, True
             brand, pname = "MockBrand", "Mock Product"
+
         return json.dumps(
             {
                 "product_name": pname,
                 "brand": brand,
-                "general_category": taxonomy.general_of(code),
+                "name_brand_identifiable": ident,
+                "ad_language": lang,
+                "country": country,
+                "general_id": gid,
                 "specific_code": code,
-                "specific_confidence": conf,
-                "general_confidence": min(0.99, conf + 0.3),
+                "candidate_codes": list(pair),
+                "leaf_vs_parent": "leaf",
+                "specific_confidence": spec,
+                "general_confidence": gen,
                 "reasoning": "[mock] 依据包装正面文字与产品形态判断。",
-                "alternative_code": rng.choice([c for c in taxonomy.CODES if c != code]),
-                "name_or_brand_legible": legible,
             },
             ensure_ascii=False,
         )
@@ -129,9 +236,10 @@ class MockVLM(BaseVLM):
 
 class GeminiVLM(BaseVLM):
     name = "gemini"
+    adapter = "gemini"
 
     async def _raw_classify(self, image_path: str, system_prompt: str) -> str:
-        # TODO(W3): pip install google-genai；改用官方 SDK 的 async client
+        # TODO(W3): 可换 google-genai 官方 SDK；当前用 REST 保持零额外依赖
         import httpx
 
         if not settings.gemini_api_key:
@@ -163,10 +271,10 @@ class GeminiVLM(BaseVLM):
 
 class QwenVLM(BaseVLM):
     name = "qwen"
+    adapter = "qwen"
 
     async def _raw_classify(self, image_path: str, system_prompt: str) -> str:
-        # DashScope 兼容 OpenAI 协议
-        import httpx
+        import httpx  # DashScope 兼容 OpenAI 协议
 
         if not settings.dashscope_api_key:
             raise VLMError("缺少 DASHSCOPE_API_KEY")
@@ -199,6 +307,7 @@ class OpenAIVLM(BaseVLM):
     """方案 §7：GPT-4o 只在 eval runner 里作为对照出现。"""
 
     name = "openai"
+    adapter = "openai"
 
     async def _raw_classify(self, image_path: str, system_prompt: str) -> str:
         import httpx
@@ -250,11 +359,16 @@ async def classify(image_path: str, *, few_shots: list[str] | None = None) -> Cl
     return await get_vlm().classify(image_path, few_shots=few_shots)
 
 
+def settings_llm_name() -> str:
+    """当前纯文本 LLM 的 adapter 名 —— 抽取出来的 Evidence 要打这个标记。"""
+    return settings.llm_provider
+
+
 # --------------------------------------------------------------------------- #
 # 纯文本 LLM（adjudicate / 报告生成共用）
 # --------------------------------------------------------------------------- #
 async def complete(system_prompt: str, user_prompt: str) -> str:
-    """TODO(W4): 接真实 provider；mock 下由调用方走自己的兜底逻辑。"""
+    """TODO(W4): 接真实 provider；mock 下由调用方走本地兜底逻辑（并打 rule-fallback 标记）。"""
     provider = settings.llm_provider
     if provider == "mock":
         raise VLMError("mock LLM: 调用方应走本地兜底逻辑")

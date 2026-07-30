@@ -22,7 +22,8 @@ def aggregate(batch_id: str) -> dict[str, Any]:
     conf_hist = {"0.0-0.5": 0, "0.5-0.7": 0, "0.7-0.85": 0, "0.85-1.0": 0}
     routes: Counter[str] = Counter()
     choices: Counter[str] = Counter()
-    done = searched = human = 0
+    adapters: Counter[str] = Counter()
+    done = searched = human = parent_level = 0
 
     for r in rows:
         final = r.get("final")
@@ -33,19 +34,28 @@ def aggregate(batch_id: str) -> dict[str, Any]:
         if r.get("human_choice"):
             human += 1
             choices[r["human_choice"]] += 1
+        for step in r.get("trace") or []:
+            if step.get("adapter"):
+                adapters[step["adapter"]] += 1
         if not final:
             continue
         done += 1
-        general_dist[final["general_category"]] += 1
-        specific_dist[str(final["specific_code"])] += 1
+        general_dist[final.get("general_category") or "(unknown)"] += 1
+        code = final.get("specific_code")
+        if code is None:
+            parent_level += 1                      # 粒度自适应：只定到父类
+        else:
+            specific_dist[str(code)] += 1
         c = final.get("specific_confidence", 0.0)
         key = (
             "0.85-1.0" if c >= 0.85 else "0.7-0.85" if c >= 0.7 else "0.5-0.7" if c >= 0.5 else "0.0-0.5"
         )
         conf_hist[key] += 1
 
-    hfss_codes = {12, 13, 14, 16, 17, 19, 20, 21, 23, 24, 25, 32}
-    hfss = sum(v for k, v in specific_dist.items() if int(k) in hfss_codes)
+    # HFSS 归属来自 taxonomy.HFSS_VERDICTS 判定表（逐条可审），不是名称正则猜的
+    risky = taxonomy.hfss_codes()
+    hfss = sum(v for k, v in specific_dist.items() if int(k) in risky)
+    alcohol = sum(v for k, v in specific_dist.items() if int(k) in taxonomy.alcohol_codes())
 
     return {
         "total": n,
@@ -60,6 +70,11 @@ def aggregate(batch_id: str) -> dict[str, Any]:
         "original_adopted_rate": round(choices["original"] / human, 4) if human else 0.0,
         "prediction_adopted_rate": round(choices["prediction"] / human, 4) if human else 0.0,
         "hfss_share": round(hfss / done, 4) if done else 0.0,
+        "alcohol_share": round(alcohol / done, 4) if done else 0.0,
+        "parent_level_count": parent_level,
+        "parent_level_share": round(parent_level / done, 4) if done else 0.0,
+        "adapters": dict(adapters),
+        "taxonomy_version": taxonomy.load().version,
         "cache": cache_store.stats(),
     }
 
@@ -90,7 +105,8 @@ def _template_report(s: dict[str, Any]) -> str:
     top_specific = sorted(s["specific_distribution"].items(), key=lambda kv: -kv[1])[:3]
     spec_txt = (
         "、".join(
-            f"[{c}] {taxonomy.BY_CODE[int(c)].name[:24]}（{v} 条）" for c, v in top_specific
+            f"[{c}] {(taxonomy.get(int(c)).name_zh if taxonomy.get(int(c)) else '?')}（{v} 条）"
+            for c, v in top_specific
         )
         or "无"
     )
@@ -102,14 +118,16 @@ def _template_report(s: dict[str, Any]) -> str:
 细类分布 Top3：{spec_txt}。
 
 ## 二、HFSS 风险
-高糖/高脂/高盐相关细类占已完成样本的 {s['hfss_share']:.1%}。
+高糖/高脂/高盐相关细类占已完成样本的 {s['hfss_share']:.1%}；酒精类另占 {s['alcohol_share']:.1%}（不计入 HFSS）。
 置信度分布：{s['confidence_histogram']}。
+仅定到父类（细类待定）的样本：{s['parent_level_count']} 条（{s['parent_level_share']:.1%}）。
 
 ## 三、Agent 运行质量
 - 搜索触发率：{s['search_trigger_rate']:.1%}
 - 人工复核率：{s['human_review_rate']:.1%}
 - 人工裁定中采纳 original {s['original_adopted_rate']:.1%}，采纳 prediction {s['prediction_adopted_rate']:.1%}
-- 产品缓存库：{s['cache']['products']} 个档案，累计命中 {s['cache']['total_hits']} 次
+- 产品缓存库：{s['cache']['products']} 个档案（人工核验 {s['cache']['human_verified']} 个，被人工覆盖 {s['cache']['superseded']} 次），累计命中 {s['cache']['total_hits']} 次
+- 结果产出方（adapter）：{s['adapters']}｜taxonomy {s['taxonomy_version']}
 
 ## 四、建议
 优先复核落在 0.5–0.85 置信区间的样本；对高频出现的品牌补充缓存档案可进一步压低人工复核率。

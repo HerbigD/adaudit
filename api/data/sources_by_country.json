@@ -1,0 +1,65 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "updated": "2026-07-30",
+    "note": "域名表按国家配置。新增国家/数据源只改本文件，代码零改动（Day5 §5 / §9 软约定 2）。",
+    "source_type_rules": "品牌官网域名含 brand → official（与国家无关，永远生效）；命中 ecommerce/nutrition_db 表 → 对应类型；其余 → other。",
+    "empty_ok": "空表项不阻塞运行，靠 official/ecommerce 兜底；后续按 eval 失败案例补充。"
+  },
+
+  "blacklist": {
+    "_note": "内容农场 / 视频站 / 问答站 / 新闻站 —— 这些页面即使标题命中产品名，也不承载营养成分表。",
+    "video": ["youtube.com", "dailymotion.com", "tiktok.com", "vimeo.com"],
+    "social": ["facebook.com", "instagram.com", "pinterest.com", "twitter.com", "x.com"],
+    "qa": ["quora.com", "answers.com", "reddit.com", "brainly.in"],
+    "news": [
+      "ndtv.com",
+      "timesofindia.indiatimes.com",
+      "hindustantimes.com",
+      "thedailystar.net",
+      "dawn.com",
+      "dailymirror.lk"
+    ],
+    "farm": ["slideshare.net", "scribd.com", "coursehero.com", "ehow.com"]
+  },
+
+  "countries": {
+    "IN": {
+      "name": "India",
+      "languages": ["en", "hi", "ta", "bn"],
+      "ecommerce": [
+        "amazon.in",
+        "flipkart.com",
+        "bigbasket.com",
+        "blinkit.com",
+        "jiomart.com",
+        "zeptonow.com"
+      ],
+      "nutrition_db": ["fatsecret.co.in", "myfitnesspal.com"]
+    },
+    "BD": {
+      "name": "Bangladesh",
+      "languages": ["bn", "en"],
+      "ecommerce": ["daraz.com.bd", "chaldal.com", "shwapno.com"],
+      "nutrition_db": []
+    },
+    "PK": {
+      "name": "Pakistan",
+      "languages": ["ur", "en"],
+      "ecommerce": ["daraz.pk", "naheed.pk", "alfatah.pk"],
+      "nutrition_db": []
+    },
+    "LK": {
+      "name": "Sri Lanka",
+      "languages": ["si", "ta", "en"],
+      "ecommerce": ["daraz.lk", "keells.com", "cargillsonline.com"],
+      "nutrition_db": []
+    },
+    "_global": {
+      "name": "Global fallback",
+      "languages": ["en"],
+      "ecommerce": ["amazon.com", "iherb.com"],
+      "nutrition_db": ["fdc.nal.usda.gov", "nutritionix.com", "openfoodfacts.org"]
+    }
+  }
+}

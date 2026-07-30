@@ -31,7 +31,19 @@ class Prediction:
     cache_hit: bool
     latency_ms: int = 0
     cost_usd: float = 0.0
+    # 结果产出方（mock-vlm / rule-fallback / gemini / …）—— runner 的断言位靠它
+    adapters: tuple[str, ...] = ()
+    leaf_vs_parent: str = "leaf"
+    # Day5 §9：按语言/国家切片看准确率是"泛化设计"叙事的数据基础。
+    # 当前只留档，切片指标待 eval 分层那一步再做。
+    language: str = "en"
+    country: str | None = None
+    search_status: str | None = None
     trace: list[dict] = field(default_factory=list)
+
+    @property
+    def is_mock(self) -> bool:
+        return any(a.startswith("mock") or a == "rule-fallback" for a in self.adapters)
 
 
 def _acc(pairs: list[tuple[int, int | None]]) -> float:
@@ -95,9 +107,9 @@ def confusion_matrix(preds: list[Prediction]) -> dict[int, dict[int, int]]:
 
 
 def confusing_pair_report(preds: list[Prediction]) -> list[dict[str, Any]]:
-    """2/12、5/19、8/23 三个混淆对在搜索前后的改善。"""
+    """taxonomy.json 声明的混淆对在搜索前后的改善。"""
     out = []
-    for a, b in taxonomy.CONFUSING_PAIRS:
+    for a, b in taxonomy.confusing_pairs():
         subset = [p for p in preds if p.gold_specific in (a, b)]
         out.append(
             {
@@ -110,10 +122,29 @@ def confusing_pair_report(preds: list[Prediction]) -> list[dict[str, Any]]:
     return out
 
 
+def parent_level_share(preds: list[Prediction]) -> float:
+    """粒度自适应触发率：最终只定到父类的比例。"""
+    if not preds:
+        return 0.0
+    return sum(1 for p in preds if p.leaf_vs_parent == "parent") / len(preds)
+
+
 def summarize(preds: list[Prediction]) -> dict[str, Any]:
     lat = [p.latency_ms for p in preds if p.latency_ms]
+    adapters = sorted({a for p in preds for a in p.adapters})
+    from collections import Counter
+
     return {
         "n": len(preds),
+        "adapters": adapters,
+        "contains_mock": any(p.is_mock for p in preds),
+        "parent_level_share": parent_level_share(preds),
+        # 留档：语言/国家/搜索状态分布（切片准确率待 eval 分层那一步）
+        "language_distribution": dict(Counter(p.language for p in preds)),
+        "country_distribution": dict(Counter(p.country or "unknown" for p in preds)),
+        "search_status_distribution": dict(
+            Counter(p.search_status or "none" for p in preds)
+        ),
         "exact_match": exact_match(preds),
         "general_match": general_match(preds),
         "search_gain": search_gain(preds),

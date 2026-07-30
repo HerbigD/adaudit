@@ -2,8 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import type { Classification, Evidence, SpecificCategory } from "@/lib/types";
+import type {
+  Classification,
+  Evidence,
+  GeneralCategory,
+  SpecificCategory,
+} from "@/lib/types";
 import { AuditCard } from "./AuditCard";
+import { EvidenceList } from "./EvidenceList";
 
 /**
  * 双选项对比 —— 全链路闭环的核心交互（W6 红线）。
@@ -26,18 +32,29 @@ export function ReviewCompare({
   onDecided?: (result: { status: string; ingested: string[] }) => void;
 }) {
   const [specifics, setSpecifics] = useState<SpecificCategory[]>([]);
-  const [general, setGeneral] = useState<string>("");
+  const [generals, setGenerals] = useState<GeneralCategory[]>([]);
+  const [generalId, setGeneralId] = useState<number | "">("");
   const [manualCode, setManualCode] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [ingested, setIngested] = useState<string[] | null>(null);
 
   useEffect(() => {
-    api.taxonomy().then((t) => setSpecifics(t.specifics)).catch(() => void 0);
+    api
+      .taxonomy()
+      .then((t) => {
+        setSpecifics(t.specifics);
+        setGenerals(t.generals);
+      })
+      .catch(() => void 0);
   }, []);
 
-  const generals = Array.from(new Set(specifics.map((s) => s.general)));
-  const leafOptions = specifics.filter((s) => s.general === general);
+  const leafOptions = specifics.filter((s) => s.parent_id === generalId);
+  // 叶子待定时，把候选类别顶到列表最前面 —— 人工最可能就在这两个里选
+  const candidates = new Set([
+    ...(initial?.candidate_codes ?? []),
+    ...(revised?.candidate_codes ?? []),
+  ]);
 
   async function decide(choice: "original" | "prediction" | "manual") {
     setBusy(true);
@@ -74,36 +91,7 @@ export function ReviewCompare({
         <AuditCard classification={revised} title="prediction · 搜索后重裁决" verified={!!revised} />
       </div>
 
-      {evidence.length > 0 && (
-        <div className="card">
-          <h3 className="mb-2 text-sm font-semibold">营养证据</h3>
-          <ul className="space-y-2 text-xs">
-            {evidence.map((e, i) => (
-              <li key={i} className="rounded-lg bg-slate-50 p-2">
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="rounded bg-white px-1.5 py-0.5">#{i}</span>
-                  <span className="rounded bg-white px-1.5 py-0.5">{e.source}</span>
-                  {e.url && (
-                    <a className="truncate text-brand hover:underline" href={e.url} target="_blank" rel="noreferrer">
-                      {e.title ?? e.url}
-                    </a>
-                  )}
-                </div>
-                <div className="text-slate-600">
-                  {[
-                    e.sugar_g != null && `糖 ${e.sugar_g}g`,
-                    e.fat_g != null && `脂肪 ${e.fat_g}g`,
-                    e.fibre_g != null && `纤维 ${e.fibre_g}g`,
-                    e.salt_g != null && `盐 ${e.salt_g}g`,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || "未抽取到结构化营养数据"}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {evidence.length > 0 && <EvidenceList evidence={evidence} />}
 
       <div className="card space-y-3">
         <div className="flex flex-wrap gap-2">
@@ -120,16 +108,16 @@ export function ReviewCompare({
           <div className="flex flex-wrap items-center gap-2">
             <select
               className="rounded-lg border border-line px-2 py-1.5 text-sm"
-              value={general}
+              value={generalId}
               onChange={(e) => {
-                setGeneral(e.target.value);
+                setGeneralId(e.target.value ? Number(e.target.value) : "");
                 setManualCode(null);
               }}
             >
               <option value="">选择大类…</option>
               {generals.map((g) => (
-                <option key={g} value={g}>
-                  {g}
+                <option key={g.id} value={g.id}>
+                  {g.label} / {g.name_zh}
                 </option>
               ))}
             </select>
@@ -137,13 +125,13 @@ export function ReviewCompare({
             <select
               className="min-w-64 rounded-lg border border-line px-2 py-1.5 text-sm"
               value={manualCode ?? ""}
-              disabled={!general}
+              disabled={generalId === ""}
               onChange={(e) => setManualCode(Number(e.target.value))}
             >
               <option value="">选择细类…</option>
               {leafOptions.map((s) => (
                 <option key={s.code} value={s.code}>
-                  [{s.code}] {s.name.slice(0, 48)}
+                  {candidates.has(s.code) ? "★ " : ""}[{s.code}] {s.name_zh}
                 </option>
               ))}
             </select>

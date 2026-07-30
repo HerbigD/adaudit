@@ -3,10 +3,14 @@
 单独成节点的理由（方案 §5）：cache 命中时**根本不该发起网络调用**，
 拆开后条件边可以在命中时直接跳到 adjudicate；
 eval 的"缓存命中率"指标 = 数 web_search 节点被跳过多少次。
+
+Day 3 加固 1：命中 `auto` 档案（搜索自动沉淀、未经人工核验）时在 trace 里显式记来源，
+这样失败案例归因才分得清"错在感知 / 错在检索 / 错在一条没人核过的缓存"。
 """
 
 from __future__ import annotations
 
+from config import settings
 from graph import events
 from graph.state import AuditState
 from services import cache_store
@@ -23,19 +27,36 @@ async def cache_lookup(state: AuditState) -> dict:
         await events.emit_log("cache_lookup", "正在查询产品知识缓存库…")
         record, score = cache_store.lookup(initial.brand, initial.product_name)
 
-        if record and score >= _threshold():
+        if record and score >= settings.cache_hit_threshold:
+            provenance = record.get("provenance", "auto")
             evidence = cache_store.to_evidence(record)
-            t.summary = f"缓存命中 {record['brand']} / {record['product_name']}（score={score:.2f}）"
-            await events.emit_log("cache_lookup", f"缓存命中：{record['product_name']} — 免搜索")
-            return {"cache_hit": True, "evidence": evidence, "trace": [t]}
+            verified = provenance == "human_verified"
+            tag = "人工核验" if verified else "自动沉淀·未经人工核验"
+            t.summary = (
+                f"缓存命中 {record['brand']} / {record['product_name']}"
+                f"（score={score:.2f}, provenance={provenance}, rev={record.get('revision', 1)}）"
+            )
+            t.extra = {
+                "cache_id": record.get("id"),
+                "provenance": provenance,
+                "revision": record.get("revision", 1),
+                "hit_count": record.get("hit_count", 0),
+                "score": round(score, 3),
+            }
+            if not verified:
+                # 不是失败，但要在轨迹里留痕：这条证据没人核过
+                t.extra["unverified_cache"] = True
+            await events.emit_log(
+                "cache_lookup", f"缓存命中：{record['product_name']}（{tag}）— 免搜索"
+            )
+            return {
+                "cache_hit": True,
+                "cache_provenance": provenance,
+                "search_status": "cache",
+                "evidence": evidence,
+                "trace": [t],
+            }
 
-        t.status = "ok"
         t.summary = f"缓存未命中（best score={score:.2f}）"
         await events.emit_log("cache_lookup", "缓存未命中，转联网搜索")
-        return {"cache_hit": False, "trace": [t]}
-
-
-def _threshold() -> float:
-    from config import settings
-
-    return settings.cache_hit_threshold
+        return {"cache_hit": False, "cache_provenance": None, "trace": [t]}

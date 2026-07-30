@@ -20,12 +20,14 @@ def decide_route_1(state: AuditState) -> Route1:
     if initial is None:
         return "human"                                   # 感知失败 → 人工
 
-    high_specific = initial.specific_confidence >= settings.direct_threshold
-    if high_specific:
+    # 叶子未定（粒度自适应按父类输出）一律不能直出 —— 报告要落到细类
+    if initial.leaf_vs_parent == "leaf" and (
+        initial.specific_confidence >= settings.direct_threshold
+    ):
         return "direct"                                  # 多数样本走这里，控制成本
 
     has_anchor = bool(
-        initial.name_or_brand_legible and (initial.brand or initial.product_name)
+        initial.name_brand_identifiable and (initial.brand or initial.product_name)
     )
     # 取证有锚点才有意义；搜索都没关键词，别浪费预算
     return "search" if has_anchor else "human"
@@ -45,17 +47,32 @@ def cache_hit(state: AuditState) -> str:
 # --------------------------------------------------------------------------- #
 # 条件边② f(revised.confidence, 搜索健康度) → direct_verified | human
 # --------------------------------------------------------------------------- #
+def verified_threshold_for(search_status: str | None) -> float:
+    """`degraded` 档不该和实锤营养数据享受同样的直出门槛（Day5 §7）。
+
+    也不该直接扔人工 —— 给一次**加严**的机审机会，人工复核率才不会被低质量搜索打爆。
+    """
+    base = settings.verified_threshold
+    return base + settings.degraded_threshold_bump if search_status == "degraded" else base
+
+
 def decide_route_2(state: AuditState) -> Route2:
+    status = state.get("search_status")
     revised = state.get("revised")
+
+    if status == "conflict":
+        return "human"                                   # 冲突强制人工，不看置信度
     if revised is None:
         return "human"                                   # 取证失败/无重裁决
     if revised.conflict:
-        return "human"                                   # 证据冲突 → 人工
+        return "human"
     if not state.get("evidence"):
         return "human"
+    if revised.specific_code is None:
+        return "human"                                   # 证据没能把叶子定下来 → 人工
     return (
         "direct_verified"
-        if revised.specific_confidence >= settings.verified_threshold
+        if revised.specific_confidence >= verified_threshold_for(status)
         else "human"
     )
 

@@ -28,15 +28,15 @@ def import_csv(path: str | Path, source: str = "manual_label") -> int:
     n = 0
     with Path(path).open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            code = int(row["gold_specific"])
-            if not taxonomy.is_valid(code):
+            code = taxonomy.normalize(row["gold_specific"])   # 历史 22 → 32
+            if code is None:
                 continue
             db.add_eval_sample(
                 image_path=row["image_path"],
                 gold_general=taxonomy.general_of(code),
                 gold_specific=str(code),
                 source=source,
-                is_confusing_pair=any(code in p for p in taxonomy.CONFUSING_PAIRS),
+                is_confusing_pair=any(code in p for p in taxonomy.confusing_pairs()),
             )
             n += 1
     return n
