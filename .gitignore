@@ -3,6 +3,10 @@ data/*.db
 data/*.db-*
 data/chroma/
 data/uploads/
+data/usage.json
+data/usage.lock
+data/usage.tmp
+data/day6/
 !data/.gitkeep
 
 # Python

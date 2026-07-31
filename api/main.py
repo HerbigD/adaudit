@@ -14,7 +14,7 @@ import db
 from config import settings
 from graph import builder
 from routers import audits, batches, review
-from services import cache_store, memory, taxonomy
+from services import cache_store, memory, taxonomy, usage
 
 
 @asynccontextmanager
@@ -52,6 +52,10 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "env": settings.app_env,
         "vlm_provider": settings.vlm_provider,
+        "llm_provider": settings.llm_provider,
+        "search_provider": settings.search_provider,
+        "model": settings.vlm_model or settings.qwen_model,
+        "usage": usage.snapshot(),
         "thresholds": {
             "direct": settings.direct_threshold,
             "verified": settings.verified_threshold,
@@ -66,6 +70,12 @@ async def health() -> dict[str, Any]:
         "cache": cache_store.stats(),
         "memory": memory.stats(),
     }
+
+
+@meta.get("/usage")
+async def get_usage() -> dict[str, Any]:
+    """当日 token 记账与预算余量（Day6 任务 0）。UI 顶栏与批次页消费这个。"""
+    return usage.snapshot()
 
 
 @meta.get("/taxonomy")

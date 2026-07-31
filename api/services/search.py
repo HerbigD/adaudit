@@ -233,15 +233,97 @@ class SearchOutcome:
         return self.hit_query.tier if self.hit_query else 0
 
 
-async def _search_once(query: str) -> list[SearchHit]:
-    """单次查询。
+SEARCH_SYSTEM_PROMPT = """You are a web research assistant for a nutrition-policy audit system.
+Search the web for the requested product and report the pages that actually carry a
+nutrition / ingredients panel.
 
-    TODO(W4/Day6): 接 MCP 联网搜索工具。接入点只需把 query -> hits 的形状转换写在这里，
-    上面的预算/重试/降级逻辑一律不改。
-    """
-    if settings.app_env == "mock":
+Rules:
+1. Report ONLY pages you actually retrieved. Never invent a URL.
+2. Prefer the brand's official site, then nutrition databases, then major e-commerce
+   product pages. Skip news articles, videos, forums and blogs.
+3. `snippet` must quote the nutrition figures verbatim from the page when present
+   (e.g. "Per 100 g: Energy 1580 kJ, Fat 4.2 g, Sugars 24.6 g"). Do not paraphrase numbers,
+   do not convert units, do not fill in values that are absent.
+4. Pages may be in English, Hindi, Bengali, Urdu, Sinhala or Tamil — quote whichever
+   language carries the panel.
+5. Return at most 5 results.
+
+Output strict JSON only:
+{"results":[{"title":string,"url":string,"snippet":string}]}"""
+
+
+async def _search_once(query: str) -> list[SearchHit]:
+    """单次查询。后端由 `SEARCH_PROVIDER` 决定，上面的预算/重试/降级逻辑与后端无关。"""
+    provider = settings.search_provider
+    if provider == "mock" or settings.app_env == "mock":
         return _mock_search(query)
-    raise NotImplementedError("接入 MCP 搜索工具后实现")
+    if provider == "dashscope":
+        return await _dashscope_search(query)
+    raise NotImplementedError(f"未知 search_provider: {provider}")
+
+
+def _hits_from_search_info(raw: dict[str, Any]) -> list[SearchHit]:
+    """从百炼返回的 `search_info.search_results` 取真实 URL。
+
+    这是**唯一可信的 URL 来源** —— 正文里模型自己写的 URL 可能是编的，
+    而 search_info 里的条目是检索器实际访问过的页面。
+    """
+    info = (raw.get("search_info") or {}) if isinstance(raw, dict) else {}
+    if not info:
+        choices = raw.get("choices") or []
+        if choices:
+            info = (choices[0].get("message") or {}).get("search_info") or {}
+    out: list[SearchHit] = []
+    for item in (info.get("search_results") or []):
+        url = item.get("url") or item.get("link") or ""
+        if url:
+            out.append(SearchHit(
+                url=url,
+                title=item.get("title") or item.get("site_name") or url,
+                snippet=item.get("snippet") or "",
+            ))
+    return out
+
+
+async def _dashscope_search(query: str) -> list[SearchHit]:
+    """百炼内置联网。
+
+    取证策略是**两路合并**：
+      · `search_info.search_results` —— 检索器真实访问过的页面，URL 可信
+      · 模型正文里的 JSON —— 带回了页面上的营养数字原文（snippet），抽取阶段要用
+    以 URL 为键合并：URL 只认 search_info 的，snippet 优先用模型摘出来的那份。
+    URL 对不上的正文条目一律丢弃 —— 宁可少一条证据，也不能让编造的链接进 trace。
+    """
+    from services import vlm  # 延迟导入，避免 search ↔ vlm 循环
+
+    text, raw = await vlm.dashscope_chat(
+        [
+            {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Search query: {query}"},
+        ],
+        model=settings.llm_model or settings.qwen_model,
+        want_json=True,
+        enable_search=True,
+        timeout=settings.search_timeout_s * 3,
+    )
+
+    retrieved = _hits_from_search_info(raw)
+    by_url = {h.url.rstrip("/"): h for h in retrieved}
+
+    try:
+        payload = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
+        for item in payload.get("results", [])[: settings.search_hits_per_query]:
+            url = (item.get("url") or "").rstrip("/")
+            if url in by_url:
+                by_url[url] = SearchHit(
+                    url=by_url[url].url,
+                    title=item.get("title") or by_url[url].title,
+                    snippet=item.get("snippet") or by_url[url].snippet,
+                )
+    except Exception:  # noqa: BLE001 — 正文不是 JSON 也无所谓，search_info 已够用
+        pass
+
+    return list(by_url.values())[: settings.search_hits_per_query]
 
 
 def _mock_search(query: str) -> list[SearchHit]:

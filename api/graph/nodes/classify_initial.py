@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from graph import edges, events
 from graph.state import AuditState, Classification
-from services import memory, taxonomy, vlm
+from services import memory, taxonomy, usage, vlm
 
 
 async def classify_initial(state: AuditState) -> dict:
@@ -25,9 +25,21 @@ async def classify_initial(state: AuditState) -> dict:
             await events.emit_log("classify_initial", f"注入 {len(shots)} 条历史修正样例")
 
         try:
-            initial: Classification = await vlm.classify(
-                state["ad_image"], few_shots=shots or None
-            )
+            with usage.collect() as u:
+                initial: Classification = await vlm.classify(
+                    state["ad_image"], few_shots=shots or None
+                )
+            t.tokens_in, t.tokens_out, t.cost_usd = u.tokens_in, u.tokens_out, u.cost
+        except usage.BudgetExceeded as exc:
+            # 成本熔断：不是模型出错，是我们主动拒调。作为正常路由结果转人工。
+            t.status = "fallback"
+            t.fallback_reason = "budget_exceeded"
+            t.adapter = vlm.get_vlm().adapter
+            t.summary = f"成本熔断，拒绝调用：{exc}"
+            t.extra["budget"] = usage.snapshot()
+            await events.emit_log("classify_initial", f"⛔ {t.summary}")
+            events.emit("classified", initial=None, error=str(exc), route_1="human")
+            return {"initial": None, "route_1": "human", "trace": [t], "error": str(exc)}
         except Exception as exc:  # noqa: BLE001 — 感知失败不炸图，转人工
             t.status = "fallback"
             t.fallback_reason = "invalid_output"
@@ -46,9 +58,6 @@ async def classify_initial(state: AuditState) -> dict:
             "general_id": initial.general_id,
             "taxonomy_version": taxonomy.load().version,
         }
-        # TODO(W3-真实provider): 从 provider 回传 usage，填 tokens_in / tokens_out / cost_usd
-        t.tokens_in = 0
-        t.tokens_out = 0
         t.summary = (
             f"{initial.label()}｜leaf={initial.specific_confidence:.2f} "
             f"parent={initial.general_confidence:.2f}｜brand={initial.brand or '-'}"

@@ -11,11 +11,17 @@ from services import cache_store
 
 
 @pytest.fixture(autouse=True)
-def _clean_cache():
+def _clean_cache(tmp_path, monkeypatch):
+    """SQLite 行与向量库**都要**隔离 —— 只清前者会让命中得分依赖测试执行顺序。"""
+    from services import vectorstore
+
+    monkeypatch.setattr(settings, "chroma_path", str(tmp_path / "chroma"))
+    vectorstore.reset()
     db.init_db()
     with db.cursor() as cur:
         cur.execute("DELETE FROM product_cache")
     yield
+    vectorstore.reset()
 
 
 def clf(conf: float = 0.95, code: int | None = 12, **kw) -> Classification:

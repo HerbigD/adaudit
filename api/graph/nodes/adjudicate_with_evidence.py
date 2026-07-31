@@ -15,7 +15,7 @@ import json
 from config import settings
 from graph import edges, events
 from graph.state import AuditState, Classification, Evidence
-from services import cache_store, nutrition, taxonomy, vlm
+from services import cache_store, nutrition, taxonomy, usage, vlm
 
 
 def _evidence_block(evidence: list[Evidence]) -> str:
@@ -76,13 +76,23 @@ async def adjudicate_with_evidence(state: AuditState) -> dict:
         )
 
         try:
-            text = await vlm.complete(taxonomy.build_adjudicate_prompt(), user_prompt)
-            revised = vlm.parse_classification(
-                text,
-                source="adjudicator",
-                model=settings.llm_provider,
-                adapter=settings.llm_provider,
-            )
+            with usage.collect() as u:
+                text = await vlm.complete(taxonomy.build_adjudicate_prompt(), user_prompt)
+                revised = vlm.parse_classification(
+                    text,
+                    source="adjudicator",
+                    model=settings.llm_model or settings.qwen_model,
+                    adapter=settings.llm_provider,
+                )
+            t.tokens_in, t.tokens_out, t.cost_usd = u.tokens_in, u.tokens_out, u.cost
+        except usage.BudgetExceeded as exc:
+            # 熔断时不静默退回规则兜底 —— 那会让一条"省钱的降级"看起来像正常裁决
+            t.status = "fallback"
+            t.fallback_reason = "budget_exceeded"
+            t.summary = f"成本熔断，拒绝裁决：{exc}"
+            t.extra["budget"] = usage.snapshot()
+            await events.emit_log("adjudicate_with_evidence", f"⛔ {t.summary}")
+            return {"route_2": "human", "trace": [t]}
         except Exception:  # noqa: BLE001 — mock 模式或裁决失败都走规则兜底
             revised = _rule_based(initial, evidence, conflict, degraded)
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import mimetypes
 import random
 import re
@@ -21,7 +22,9 @@ from typing import Any
 
 from config import settings
 from graph.state import Classification
-from services import taxonomy
+from services import taxonomy, usage
+
+logger = logging.getLogger(__name__)
 
 MAX_PARSE_RETRIES = 2
 
@@ -151,6 +154,9 @@ class BaseVLM(ABC):
     async def classify(
         self, image_path: str, *, few_shots: list[str] | None = None
     ) -> Classification:
+        # 熔断放在**基类**而不是各家 adapter 里：这样任何一个 provider 实现
+        # 都不可能"忘了过闸"，新增 provider 时也不用重复写。
+        usage.guard(self.adapter)
         prompt = taxonomy.build_classify_prompt(few_shots)
         last: Exception | None = None
         for attempt in range(MAX_PARSE_RETRIES + 1):
@@ -160,6 +166,8 @@ class BaseVLM(ABC):
                     text, source="vlm", model=self.name, adapter=self.adapter
                 )
                 return apply_granularity_policy(c)
+            except usage.BudgetExceeded:
+                raise                    # 熔断不重试：重试既救不回预算，也会掩盖拒调原因
             except Exception as exc:  # noqa: BLE001 — 校验失败就地重试
                 last = exc
                 await asyncio.sleep(0.3 * (attempt + 1))
@@ -269,20 +277,92 @@ class GeminiVLM(BaseVLM):
             return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
+# --------------------------------------------------------------------------- #
+# DashScope（百炼）—— Day6 起的唯一真实 provider
+# --------------------------------------------------------------------------- #
+# JSON mode 是否可用按 (base_url, model) 记忆，避免每次调用都白试一遍
+_JSON_MODE_SUPPORTED: dict[str, bool] = {}
+
+
+def json_mode_state() -> dict[str, bool]:
+    """探测结论快照，进日报用。"""
+    return dict(_JSON_MODE_SUPPORTED)
+
+
+async def dashscope_chat(
+    messages: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    want_json: bool = True,
+    enable_search: bool = False,
+    timeout: float = 90.0,
+) -> tuple[str, dict[str, Any]]:
+    """百炼 OpenAI 兼容端点的统一入口。返回 (文本, 原始响应)。
+
+    三件事都在这里做掉，调用方不用重复：
+      1) 调用前过成本熔断（`usage.guard`），超预算直接抛，不发请求
+      2) JSON mode 探测：先试 `response_format`，被拒（400）则记住并降级到
+         prompt 契约 + 运行时校验 —— 结论进 `json_mode_state()` 写日报
+      3) 调用后按响应里的 `usage` 记账（tokens_in/out + 估算成本）
+    """
+    import httpx
+
+    model = model or settings.qwen_model
+    # 熔断是最外层的闸：超预算时连"有没有 key"都不必问，直接拒
+    usage.guard(model)
+    if not settings.dashscope_api_key:
+        raise VLMError("缺少 DASHSCOPE_API_KEY")
+    usage.note_model(model)
+
+    key = f"{settings.dashscope_base_url}|{model}"
+    use_json = want_json and settings.qwen_json_mode != "off" and _JSON_MODE_SUPPORTED.get(key, True)
+
+    def build(with_json: bool) -> dict[str, Any]:
+        p: dict[str, Any] = {
+            "model": model,
+            "temperature": 0.0,
+            "messages": messages,
+            # 非思考模式：分类/抽取是结构化任务，thinking 只拖延迟和 token
+            "enable_thinking": settings.qwen_enable_thinking,
+        }
+        if with_json:
+            p["response_format"] = {"type": "json_object"}
+        if enable_search:
+            p["enable_search"] = True
+            p["search_options"] = {"forced_search": True, "enable_source": True,
+                                   "search_strategy": "standard"}
+        return p
+
+    headers = {"Authorization": f"Bearer {settings.dashscope_api_key}"}
+    url = f"{settings.dashscope_base_url}/chat/completions"
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, json=build(use_json), headers=headers)
+        if r.status_code == 400 and use_json:
+            # JSON mode 不被该模型支持 —— 记住，改走 prompt 契约 + 运行时校验
+            logger.warning("模型 %s 拒绝 response_format，降级到 prompt 契约：%s",
+                           model, r.text[:200])
+            _JSON_MODE_SUPPORTED[key] = False
+            r = await client.post(url, json=build(False), headers=headers)
+        elif use_json and r.status_code < 400:
+            _JSON_MODE_SUPPORTED.setdefault(key, True)
+        if r.status_code >= 400:
+            raise VLMError(f"DashScope {r.status_code}: {r.text[:400]}")
+        data = r.json()
+
+    u = data.get("usage") or {}
+    usage.record(model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+    return data["choices"][0]["message"].get("content") or "", data
+
+
 class QwenVLM(BaseVLM):
     name = "qwen"
     adapter = "qwen"
 
     async def _raw_classify(self, image_path: str, system_prompt: str) -> str:
-        import httpx  # DashScope 兼容 OpenAI 协议
-
-        if not settings.dashscope_api_key:
-            raise VLMError("缺少 DASHSCOPE_API_KEY")
         b64, mime = _b64_image(image_path)
-        payload = {
-            "model": settings.qwen_model,
-            "temperature": 0.0,
-            "messages": [
+        text, _ = await dashscope_chat(
+            [
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
@@ -292,15 +372,9 @@ class QwenVLM(BaseVLM):
                     ],
                 },
             ],
-        }
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(
-                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {settings.dashscope_api_key}"},
-            )
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
+            model=settings.vlm_model or settings.qwen_model,
+        )
+        return text
 
 
 class OpenAIVLM(BaseVLM):
@@ -368,34 +442,55 @@ def settings_llm_name() -> str:
 # 纯文本 LLM（adjudicate / 报告生成共用）
 # --------------------------------------------------------------------------- #
 async def complete(system_prompt: str, user_prompt: str) -> str:
-    """TODO(W4): 接真实 provider；mock 下由调用方走本地兜底逻辑（并打 rule-fallback 标记）。"""
+    """纯文本调用（抽取 / 重裁决 / 报告）。mock 下抛错，由调用方走本地兜底并打 rule-fallback。"""
     provider = settings.llm_provider
     if provider == "mock":
         raise VLMError("mock LLM: 调用方应走本地兜底逻辑")
-    import httpx
+    usage.guard(provider)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    if provider == "qwen":
+        text, _ = await dashscope_chat(
+            messages, model=settings.llm_model or settings.qwen_model
+        )
+        return text
 
     if provider == "openai":
-        key, url, model = settings.openai_api_key, "https://api.openai.com/v1", settings.openai_model
-    elif provider == "qwen":
-        key, url, model = (
-            settings.dashscope_api_key,
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            settings.qwen_model,
+        import httpx
+
+        model = settings.openai_model
+        usage.guard(model)
+        async with httpx.AsyncClient(timeout=90) as client:
+            r = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                json={"model": model, "temperature": 0.0, "messages": messages},
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            )
+            r.raise_for_status()
+            data = r.json()
+        u = data.get("usage") or {}
+        usage.record(model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+        return data["choices"][0]["message"]["content"]
+
+    raise VLMError(f"complete() 暂不支持 provider={provider}")
+
+
+async def probe_model() -> dict[str, Any]:
+    """真跑前的可用性探测：型号在不在、能不能传图、JSON mode 支不支持。"""
+    model = settings.vlm_model or settings.qwen_model
+    out: dict[str, Any] = {"provider": settings.vlm_provider, "model": model}
+    try:
+        text, raw = await dashscope_chat(
+            [{"role": "user", "content": 'Reply with exactly {"ok":true}'}],
+            model=model, want_json=True, timeout=30,
         )
-    else:
-        raise VLMError(f"complete() 暂不支持 provider={provider}")
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            f"{url}/chat/completions",
-            json={
-                "model": model,
-                "temperature": 0.0,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            },
-            headers={"Authorization": f"Bearer {key}"},
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        out.update(reachable=True, sample=text[:80],
+                   json_mode=json_mode_state().get(
+                       f"{settings.dashscope_base_url}|{model}", True),
+                   usage=raw.get("usage"))
+    except Exception as exc:  # noqa: BLE001
+        out.update(reachable=False, error=str(exc)[:400])
+    return out

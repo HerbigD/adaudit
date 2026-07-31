@@ -12,7 +12,7 @@ from __future__ import annotations
 from config import settings
 from graph import events
 from graph.state import AuditState
-from services import nutrition, search, taxonomy
+from services import nutrition, search, taxonomy, usage
 
 
 async def web_search(state: AuditState) -> dict:
@@ -28,13 +28,22 @@ async def web_search(state: AuditState) -> dict:
         country = initial.country or settings.default_country
 
         # ---------- 1. 查询构造 + 执行 ----------
-        outcome = await search.search_product(
-            initial.brand,
-            initial.product_name,
-            ad_language=initial.ad_language,
-            country=country,
-            on_log=on_log,
-        )
+        with usage.collect() as u_search:
+            try:
+                outcome = await search.search_product(
+                    initial.brand,
+                    initial.product_name,
+                    ad_language=initial.ad_language,
+                    country=country,
+                    on_log=on_log,
+                )
+            except usage.BudgetExceeded as exc:
+                t.status = "fallback"
+                t.fallback_reason = "budget_exceeded"
+                t.summary = f"成本熔断，拒绝取证：{exc}"
+                t.extra["budget"] = usage.snapshot()
+                await events.emit_log("web_search", f"⛔ {t.summary}")
+                return {"search_status": "budget_exceeded", "trace": [t]}
         t.queries_used = outcome.queries_used
         t.extra["queries"] = [
             {
@@ -80,15 +89,21 @@ async def web_search(state: AuditState) -> dict:
         )
 
         # ---------- 3. 抽取 ----------
-        evidence, mode = await nutrition.extract_evidence(
-            candidates,
-            brand=initial.brand,
-            product_name=initial.product_name,
-            ad_language=initial.ad_language,
-            country=country,
-            query=outcome.hit_query,
-        )
+        with usage.collect() as u_extract:
+            evidence, mode = await nutrition.extract_evidence(
+                candidates,
+                brand=initial.brand,
+                product_name=initial.product_name,
+                ad_language=initial.ad_language,
+                country=country,
+                query=outcome.hit_query,
+            )
         evidence = nutrition.assign_ids(evidence)
+        # 搜索与抽取两段的真实用量合并进本节点的 trace
+        t.tokens_in = u_search.tokens_in + u_extract.tokens_in
+        t.tokens_out = u_search.tokens_out + u_extract.tokens_out
+        t.cost_usd = round(u_search.cost + u_extract.cost, 6)
+        t.extra["usage"] = {"search_calls": u_search.calls, "extract_calls": u_extract.calls}
         t.adapter = evidence[0].extracted_by if evidence else "degraded"
         t.extra["extract_mode"] = mode
         t.extra["evidence_ids"] = [e.id for e in evidence]

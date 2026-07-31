@@ -29,19 +29,54 @@ class Settings(BaseSettings):
     # vlm.py 统一 classify(image) -> Classification 接口，这里切 provider
     vlm_provider: Literal["mock", "gemini", "qwen", "openai"] = "mock"
     gemini_model: str = "gemini-2.5-flash"
-    qwen_model: str = "qwen-vl-max-latest"
+    # Day6：统一单一模型全链路（多模态），classify 传图、抽取/裁决传文本
+    qwen_model: str = "qwen3.7-plus"
     openai_model: str = "gpt-4o"
+
+    # 分别覆盖能力：留空则都用 qwen_model
+    vlm_model: str | None = None
+    llm_model: str | None = None
+
+    # 非思考模式 —— 分类/抽取是结构化任务，thinking 只会拖长延迟与 token
+    qwen_enable_thinking: bool = False
+    # JSON mode 探测：auto = 先试 response_format，400 则降级到 prompt 契约 + 运行时校验
+    qwen_json_mode: Literal["auto", "on", "off"] = "auto"
 
     gemini_api_key: str | None = None
     dashscope_api_key: str | None = None
     openai_api_key: str | None = None
+    # 中国站 / 国际站；换站只改这一行
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # 裁决用的纯文本 LLM（adjudicate / 报告生成），默认复用 VLM provider
     llm_provider: Literal["mock", "gemini", "qwen", "openai"] = "mock"
 
+    # ---------- 成本熔断（Day6 任务 0，先行于任何真实调用） ----------
+    # 主熔断用 token 而不是钱：token 无货币歧义，是 provider 直接返回的事实。
+    # 所有真实调用的 tokens_in+out 累计落 data/usage.json（跨进程不丢），
+    # 超预算立即拒调并落 trace（fallback_reason=budget_exceeded）。
+    daily_token_budget: int = 500_000
+    usage_path: str = str(DATA_DIR / "usage.json")
+    # 成本估算配置化。币种跟随百炼账单：中国站 = CNY、国际站 = USD，只改配置不改代码。
+    llm_price_in_per_mtok: float = 2.0
+    llm_price_out_per_mtok: float = 8.0
+    cost_currency: str = "CNY"
+
+    # ---------- 搜索后端 ----------
+    # dashscope = 百炼内置联网（复用同一把 key）；mock = 离线假数据
+    search_provider: Literal["mock", "dashscope"] = "mock"
+
     # ---------- 置信度阈值（条件边①②） ----------
     direct_threshold: float = 0.85          # 初分类 ≥ 此值 → 直出
-    verified_threshold: float = 0.75        # 重裁决 ≥ 此值 → direct_verified
+
+    # 重裁决 ≥ 此值 → direct_verified。
+    # **刻意低于 DIRECT_THRESHOLD（0.85）**，这不是笔误：
+    # 初分类只有"看图"一个信息源，0.85 是在要求模型对纯视觉判断非常笃定；
+    # 重裁决多了一层外部营养证据，同样的 0.75 背后实际信息量更大 —— 证据加持
+    # 本就该换来更低的直出门槛，否则取证白做，慢路径样本会全部堆到人工。
+    # 反过来，证据质量不够时（search_status=degraded）这个门槛会被 +0.05 抬回去，
+    # 见 edges.verified_threshold_for()。
+    verified_threshold: float = 0.75
     # 子类低但父类高 → 粒度自适应输出（按父类展示）
     general_fallback_threshold: float = 0.80
 

@@ -95,3 +95,13 @@ def collection(name: str):
     """name ∈ {'products', 'memory'}（方案 §2 末尾）。"""
     _ensure()
     return _client.get_or_create_collection(name)
+
+
+def reset() -> None:
+    """丢弃单例，下次访问按当前 `settings.chroma_path` 重建。
+
+    测试用：向量库是进程级单例，不重置的话上一个测试文件写进去的档案会漂到下一个，
+    命中得分因此变得依赖测试执行顺序（实测能让缓存命中分从 1.00 掉到 0.75）。
+    """
+    global _client, _backend
+    _client, _backend = None, None

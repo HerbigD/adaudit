@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
+import { UsageBadge } from "@/components/UsageBadge";
 
 export const metadata: Metadata = {
   title: "AdAudit v2 · 食品广告品类审计 Agent",
@@ -29,6 +30,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 </Link>
               ))}
             </nav>
+            <UsageBadge />
           </div>
         </header>
         <main className="mx-auto max-w-6xl px-6 py-6">{children}</main>
