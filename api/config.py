@@ -135,6 +135,13 @@ class Settings(BaseSettings):
 
     # ---------- 检索 ----------
     cache_hit_threshold: float = 0.82       # 混合检索相似度阈值，≥ 视为命中
+
+    # 缓存匹配模式（Day7 §3-16 决议，**手术预备，默认不启用**）
+    #   legacy —— 原始行为：只看混合得分。保持它是为了继续观察真实误命中分布
+    #   strict —— 加两道否决：① 非对称覆盖（档案名 token 必须被查询名全覆盖）
+    #                        ② 维度词差集否决（差集含 double/toned/full cream… → 判不命中）
+    # 切换前先看 cache_overturn_rate：没有数据支撑就改行为，等于拿准确率去赌一个直觉。
+    cache_match_mode: Literal["legacy", "strict"] = "legacy"
     memory_topk: int = 3                    # few-shot 修正记忆注入条数
 
     # ---------- 并发 ----------

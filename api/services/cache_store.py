@@ -24,6 +24,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
 from config import settings
@@ -52,6 +55,93 @@ def _doc(brand: str, product_name: str) -> str:
 def _token_overlap(a: str, b: str) -> float:
     ta, tb = set(a.lower().split()), set(b.lower().split())
     return len(ta & tb) / max(1, len(ta | tb))
+
+
+# --------------------------------------------------------------------------- #
+# strict 匹配（Day7 §3-16 · 手术预备，默认不启用）
+# --------------------------------------------------------------------------- #
+# OPEN-RISK-01：`Mock Crunchy Cereal 500g` 命中了档案 `Mock Cereal 500g`，得分 0.92。
+# 真实数据上 `Amul Toned Milk` vs `Amul Double Toned Milk` 就是 **5 vs 19**。
+# 误命中会跳过搜索、直接拿错档案裁决；而且因为走的是缓存路径，
+# `search_status="cache"`，连"证据不足"的信号都没有 —— 错得毫无痕迹。
+#
+# 两道否决，缺一不可：
+#
+# ① **非对称覆盖**：档案名的 token 必须被查询名全覆盖。
+#    它挡的是"查询比档案少词"的方向（档案 `Amul Double Toned` vs 查询 `Amul Toned Milk`）。
+#    **反方向它挡不住** —— 档案 `Amul Toned` 的 token 恰是查询 `Amul Double Toned Milk`
+#    的子集，②之前这一条会放行。数据侧核对指出的"只修了一半"就是这里。
+#
+# ② **维度词差集否决**：①放行后，看 `查询 − 档案` 的差集里有没有判定维度词。
+#    `Amul Double Toned Milk − Amul Toned Milk = {double}` → double 属脂肪维度 → 否决。
+#    这一条才是 Amul 那个方向的解药。
+#
+# 词表从 `category_terms.json` 的 `dimension_terms` 读，**不硬编码**：
+# 新增维度词只改 JSON，代码零改动。
+
+
+@lru_cache(maxsize=1)
+def dimension_terms() -> tuple[str, ...]:
+    """判定维度词表（数据驱动）。长短语在前 —— `double toned` 要先于 `toned` 被看到。"""
+    raw = json.loads(Path(settings.category_terms_path).read_text(encoding="utf-8"))
+    block = raw.get("dimension_terms", {})
+    terms = {
+        t.lower()
+        for key, values in block.items()
+        if not key.startswith("_")
+        for t in values
+    }
+    return tuple(sorted(terms, key=lambda s: (-len(s.split()), -len(s), s)))
+
+
+def _norm_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def _dimension_hits(text: str) -> set[str]:
+    """这段文本里出现了哪些维度词。多词短语按短语匹配，单词按 token 匹配。"""
+    tokens = set(_norm_tokens(text))
+    joined = " " + " ".join(_norm_tokens(text)) + " "
+    hits: set[str] = set()
+    for term in dimension_terms():
+        parts = term.split()
+        if len(parts) == 1:
+            if term in tokens:
+                hits.add(term)
+        elif f" {term} " in joined:
+            hits.add(term)
+    return hits
+
+
+def strict_reject(query_name: str, archive_name: str) -> str | None:
+    """strict 模式下的否决判定。返回否决理由字符串；`None` = 放行。
+
+    只看产品名不看品牌：品牌相同是走到这一步的前提（混合得分里已占 0.55 权重）。
+    """
+    q_tokens, a_tokens = set(_norm_tokens(query_name)), set(_norm_tokens(archive_name))
+    if not a_tokens:
+        return "档案名为空，strict 下一律不匹配"
+
+    missing = a_tokens - q_tokens
+    if missing:
+        return f"档案名的 {sorted(missing)} 未被查询名覆盖（非对称覆盖不成立）"
+
+    extra = q_tokens - a_tokens
+    if not extra:
+        return None
+
+    # 只有"查询侧新出现的维度词"才否决：多个 500g 不该否决，多个 double 该。
+    # 多词短语要求整条短语都落在查询里，避免 `double` 单独出现就被当成 `double toned`。
+    gained = {
+        d for d in _dimension_hits(query_name) - _dimension_hits(archive_name)
+        if set(d.split()) & extra
+    }
+    if gained:
+        return (
+            f"查询比档案多出判定维度词 {sorted(gained)} —— "
+            f"该维度跨类别边界，不视为同一产品"
+        )
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -89,8 +179,20 @@ def should_cache(
 # --------------------------------------------------------------------------- #
 # 检索
 # --------------------------------------------------------------------------- #
-def lookup(brand: str | None, product_name: str | None) -> tuple[dict[str, Any] | None, float]:
-    """返回 (缓存档案 or None, 得分)。得分 ≥ settings.cache_hit_threshold 视为命中。"""
+def lookup(
+    brand: str | None, product_name: str | None, *, mode: str | None = None
+) -> tuple[dict[str, Any] | None, float]:
+    """返回 (缓存档案 or None, 得分)。得分 ≥ `settings.cache_hit_threshold` 视为命中。
+
+    `mode` 缺省取 `settings.cache_match_mode`：
+
+    - `legacy` —— 只看混合得分（原始行为，**当前默认**，为的是继续观察真实误命中分布）
+    - `strict` —— 得分达标后再过 `strict_reject` 两道否决；被否决则视为未命中
+
+    被 strict 否决时**仍返回得分**，只是不返回档案 —— 这样 trace 里能看到
+    "得分 0.92 但被否决"，而不是一个看起来像"根本没匹配上"的 0.0。
+    两者对下一步该做什么的指向完全不同。
+    """
     if not brand and not product_name:
         return None, 0.0
     query = _doc(brand or "", product_name or "")
@@ -132,7 +234,19 @@ def lookup(brand: str | None, product_name: str | None) -> tuple[dict[str, Any] 
         if score > best_score:
             best, best_score = rec, score
 
+    mode = mode or settings.cache_match_mode
     if best and best_score >= settings.cache_hit_threshold:
+        if mode == "strict":
+            reason = strict_reject(product_name or "", best["product_name"])
+            if reason:
+                logger.info(
+                    "strict 否决缓存命中 %s（score=%.2f）：%s", best["id"], best_score, reason
+                )
+                rec = _decode(best)
+                rec["strict_reject_reason"] = reason
+                # 档案返回但不算命中：调用方靠 score 与 reason 一起判断，
+                # trace 里因此能留下"差点命中了什么、为什么没算"
+                return rec, best_score
         _bump_hit(best["id"])
         return _decode(best), best_score
     return (_decode(best) if best else None), best_score

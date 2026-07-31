@@ -243,6 +243,53 @@ A3 的新推导规则下，`(18,25)` 与 `(25,29)` 不再是 definitional 对
 （`register_empirical_pair`，标 `source=dev_error_analysis`）——
 这正是 A3 制度设计的用途。**但必须先有 dev split**（见 A6）。
 
+
+### D6. 缓存命中结构性依赖语义分 —— `chromadb` 装不装该定了（Day7 实测发现）
+
+**事实**：
+
+```
+W_EXACT_BRAND (0.55) + W_NAME_OVERLAP (0.20) = 0.75
+CACHE_HIT_THRESHOLD                          = 0.82
+```
+
+**品牌精确匹配 + 名称 100% 重叠也只有 0.75，够不着阈值。**
+也就是说**任何一次缓存命中都依赖语义分**那 0.25。
+
+而 `chromadb` 是 `pyproject.toml` 里的 optional extra，**当前环境没装**，
+跑的是 `_FallbackClient` —— 用 `difflib` 字符相似度冒充语义，
+它自己的注释写着"够 demo，不够 6000 张评测"。
+
+**后果**：向量库一挂或没装，缓存命中率直接归零，而 SQLite 档案还好端端躺着。
+看板上表现为"记忆机制失效"，排查方向却会指向缓存写入 —— 很难查。
+
+**三个选项**：
+
+1. **装 chromadb**（`pip install -e ".[vector]"`）—— 按原计划 W5 就该装。
+   代价：依赖变重，Docker 镜像变大
+2. **调权重让精确匹配自己就够阈值**（如 `W_EXACT_BRAND` 0.55→0.62）——
+   一行改动，但**改变缓存命中行为**，与"保持原始行为继续观察"冲突
+3. **维持现状** —— 但要接受"缓存命中率"这个指标实际测的是 difflib 的表现
+
+**我的建议**：跑 300 张 eval 之前必须选 1 或 2，否则命中率数字没有解释力。
+今日按决议**没动**，只写了用例 `test_score_ceiling_without_semantic_is_below_the_hit_threshold`
+把这个耦合钉住 —— 哪天有人调权重或阈值，那里会红。
+
+**顺带**：Day7 修了 fallback 客户端跨进程不刷新的缺陷（构造后再不读盘），
+不修则"手动插档案验证二次免搜索"永远过不了。**只改存储层，未动任何权重阈值。**
+
+### D7. strict 模式挡不住"非维度形容词"类误命中
+
+`Mock Crunchy Cereal 500g` → 档案 `Mock Cereal 500g` 在 strict 下**仍然放行**，
+因为 `crunchy` 不是营养维度词。
+
+strict 的两道规则覆盖的是"跨营养维度边界"那一类（Amul Toned/Double Toned、
+full cream、instant、zero sugar）。"纯口味/形态形容词"那一类要另立规则
+（比如"差集里出现任何未知形容词就降权而非直接命中"）。
+
+不是实现漏掉，是规则的能力边界。要不要补第三条规则，等真实误命中分布出来再说。
+
+---
 ### ~~D5. 混淆对推导判据：5 对 vs 17 对~~ —— 已由裁决①关闭（三档制）
 
 我的推导给出 5 对；数据侧的独立推导给出 17 对（其中 `nutrient_threshold` 8 对）。

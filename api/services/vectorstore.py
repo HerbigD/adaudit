@@ -49,11 +49,24 @@ class _FallbackCollection:
     def __init__(self, name: str, store: "_FallbackClient") -> None:
         self.name = name
         self._store = store
-        self._data: dict[str, dict[str, Any]] = store.data.setdefault(name, {})
+
+    @property
+    def _data(self) -> dict[str, dict[str, Any]]:
+        """每次访问都过一遍 `reload_if_changed` —— 不缓存 dict 引用。
+
+        Day7 踩到的坑：原来在 `__init__` 里把 `store.data[name]` 存成实例属性，
+        于是这个 collection 永远看的是**构造那一刻**的快照。
+        表现是 API 进程启动后，别的进程（脚本、eval runner）写进 fallback.json 的档案
+        对它完全不可见 —— 缓存命中得分停在 0.75（只有品牌+名称重叠，没有语义分），
+        刚好卡在 0.82 阈值下面，看起来就像"缓存没命中"，而不是"索引没刷新"。
+        """
+        self._store.reload_if_changed()
+        return self._store.data.setdefault(self.name, {})
 
     def upsert(self, ids, documents, metadatas, **_: Any) -> None:
+        data = self._data
         for i, doc, meta in zip(ids, documents, metadatas):
-            self._data[i] = {"document": doc, "metadata": meta}
+            data[i] = {"document": doc, "metadata": meta}
         self._store.flush()
 
     def query(self, query_texts, n_results: int = 5, **_: Any):
@@ -77,18 +90,41 @@ class _FallbackCollection:
 
 
 class _FallbackClient:
+    """JSON 落盘的极简向量库。**按 mtime 惰性重载**，这样多进程之间不会互相看不见。
+
+    不上文件锁：这是 demo 级降级实现，并发写的最坏结果是后写覆盖先写，
+    而真实并发写只会来自单个 API 进程内的顺序调用。要真正的并发安全就装 chromadb。
+    """
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.data: dict[str, dict[str, Any]] = (
-            json.loads(path.read_text()) if path.exists() else {}
-        )
+        self.data: dict[str, dict[str, Any]] = {}
+        self._mtime: float = -1.0
+        self.reload_if_changed()
+
+    def reload_if_changed(self) -> None:
+        try:
+            mtime = self.path.stat().st_mtime
+        except FileNotFoundError:
+            return
+        if mtime == self._mtime:
+            return
+        try:
+            self.data = json.loads(self.path.read_text() or "{}")
+        except json.JSONDecodeError:      # 半截文件（另一进程正在写）：下次再读
+            return
+        self._mtime = mtime
 
     def get_or_create_collection(self, name: str, **_: Any) -> _FallbackCollection:
         return _FallbackCollection(name, self)
 
     def flush(self) -> None:
         self.path.write_text(json.dumps(self.data, ensure_ascii=False))
+        try:
+            self._mtime = self.path.stat().st_mtime   # 自己写的不必再读回来
+        except FileNotFoundError:
+            pass
 
 
 def collection(name: str):

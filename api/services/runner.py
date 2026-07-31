@@ -81,6 +81,21 @@ async def _persist(app, audit_id: str) -> dict[str, Any]:
             [t.model_dump(mode="json") for t in state.get("trace", [])], ensure_ascii=False
         ),
     )
+
+    # Day7：补齐缓存命中的后续路由与人工结果。
+    # 放这里而不是节点里：图有两个终点（output→END 与 feedback_ingest→END），
+    # 节点里写就得写两处、还会漏掉 interrupt 挂起的中间态；
+    # `_persist` 是 start 与 resume 都必经的**唯一**落库点。
+    # 未命中的审计不会有对应行，`finalize_cache_hit` 的 UPDATE 自然空转。
+    if state.get("cache_hit"):
+        db.finalize_cache_hit(
+            audit_id,
+            route_1=state.get("route_1"),
+            route_2=state.get("route_2"),
+            human_choice=state.get("human_choice"),
+            cached_code=revised.specific_code if revised else None,
+            final_code=final.specific_code if final else None,
+        )
     return {"status": status, "state": state}
 
 

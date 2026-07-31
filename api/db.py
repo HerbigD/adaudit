@@ -79,6 +79,34 @@ CREATE TABLE IF NOT EXISTS eval_samples (
   is_confusing_pair INTEGER DEFAULT 0,
   created_at        TEXT
 );
+
+-- 缓存命中观测台（Day7 · OPEN-RISK-01 的观察指标）
+--
+-- 为什么单独一张表，而不是每次从 trace_json 里刨：
+-- ① 改判率要跨批次看趋势，逐条解析 JSON 既慢、又会随 trace 结构变动静默失效；
+-- ② 这张表是"缓存到底可不可信"的**证据**，它得能被直接 SELECT 出来给人看；
+-- ③ 一次审计最多一次缓存命中，audit_id 作主键天然幂等 —— resume 会重跑 _persist，
+--    靠主键 upsert 保证重复调用不会把一次命中记成两次。
+--
+-- overturned 三态：1=人工改判 / 0=人工确认 / NULL=还没走到人工。
+-- **NULL 不等于 0**：把"没人看过"算成"人工确认了"会让改判率虚低，
+-- 而这个指标存在的意义恰恰是发现缓存在悄悄喂错答案。
+CREATE TABLE IF NOT EXISTS cache_hit_log (
+  audit_id     TEXT PRIMARY KEY,
+  cache_id     TEXT,
+  score        REAL,
+  provenance   TEXT,                       -- auto | human_verified
+  match_mode   TEXT,                       -- legacy | strict（留作两态对比）
+  route_1      TEXT,
+  route_2      TEXT,
+  human_choice TEXT,
+  cached_code  INTEGER,                    -- 基于缓存证据得出的叶子（revised）
+  final_code   INTEGER,
+  overturned   INTEGER,                    -- 1 / 0 / NULL，见上
+  created_at   TEXT,
+  updated_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cache_hit_cache ON cache_hit_log(cache_id);
 """
 
 
@@ -246,3 +274,70 @@ def add_eval_sample(
             (sid, image_path, gold_general, gold_specific, source, int(is_confusing_pair), now()),
         )
     return sid
+
+
+# --------------------------------------------------------------------------- #
+# cache_hit_log（Day7 · OPEN-RISK-01 观察指标）
+# --------------------------------------------------------------------------- #
+def log_cache_hit(
+    audit_id: str,
+    cache_id: str | None,
+    score: float,
+    provenance: str | None,
+    match_mode: str,
+) -> None:
+    """命中当下就落一行。路由与人工结果稍后由 `finalize_cache_hit` 补。
+
+    用 upsert 而不是 insert：resume 会让整条链路重跑一遍，
+    insert 会撞主键或把一次命中记成两次。
+    """
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO cache_hit_log"
+            " (audit_id,cache_id,score,provenance,match_mode,created_at,updated_at)"
+            " VALUES (?,?,?,?,?,?,?)"
+            " ON CONFLICT(audit_id) DO UPDATE SET"
+            "  cache_id=excluded.cache_id, score=excluded.score,"
+            "  provenance=excluded.provenance, match_mode=excluded.match_mode,"
+            "  updated_at=excluded.updated_at",
+            (audit_id, cache_id, score, provenance, match_mode, now(), now()),
+        )
+
+
+def finalize_cache_hit(
+    audit_id: str,
+    *,
+    route_1: str | None,
+    route_2: str | None,
+    human_choice: str | None,
+    cached_code: int | None,
+    final_code: int | None,
+) -> None:
+    """补齐命中之后发生了什么。没有对应命中行就什么都不做（未命中的审计不该出现在表里）。
+
+    `overturned` 只在人工真的裁定过之后才有值：
+    人工裁定了且 final 与缓存给出的叶子不一致 → 1；一致 → 0；没走到人工 → 保持 NULL。
+    """
+    overturned = None
+    if human_choice:
+        overturned = int(final_code != cached_code)
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE cache_hit_log SET route_1=?, route_2=?, human_choice=?,"
+            " cached_code=?, final_code=?, overturned=?, updated_at=? WHERE audit_id=?",
+            (route_1, route_2, human_choice, cached_code, final_code,
+             overturned, now(), audit_id),
+        )
+
+
+def cache_hit_rows(audit_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM cache_hit_log"
+    args: list = []
+    if audit_ids is not None:
+        if not audit_ids:
+            return []
+        sql += f" WHERE audit_id IN ({','.join('?' * len(audit_ids))})"
+        args = list(audit_ids)
+    with cursor() as cur:
+        cur.execute(sql, args)
+        return [dict(r) for r in cur.fetchall()]

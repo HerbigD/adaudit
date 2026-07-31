@@ -233,14 +233,27 @@ async def fuse_test() -> dict:
             refused, err = True, str(exc)
         except Exception as exc:  # noqa: BLE001
             wrong = f"{type(exc).__name__}: {exc}"
+        # mock provider 在熔断之前就抛 VLMError —— 那不是"熔断失效"，
+        # 而是"这一态根本测不了熔断"。原来一律报 FAIL，会让人在 mock 下
+        # 误以为熔断坏了，然后去改一段本来没问题的代码。
+        is_mock = settings.llm_provider == "mock" or settings.app_env == "mock"
+        if refused:
+            verdict = "PASS 熔断生效：真实调用在发出前被拒"
+        elif is_mock and wrong:
+            verdict = (
+                f"SKIP mock 模式下测不了熔断（provider 在熔断前先抛了 {wrong}）。"
+                f"请在 LLM_PROVIDER=qwen 下重跑本项。"
+            )
+        else:
+            verdict = f"FAIL 未被熔断拦住（{wrong or '调用居然成功了'}）"
         out = {
             "budget_forced_to": 1,
             "ledger": before,
+            "provider": settings.llm_provider,
             "refused": refused,
             "refusal_message": err,
             "unexpected_error": wrong,
-            "verdict": "PASS 熔断生效：真实调用在发出前被拒" if refused
-                       else f"FAIL 未被熔断拦住（{wrong or '调用居然成功了'}）",
+            "verdict": verdict,
         }
     finally:
         settings.daily_token_budget, settings.usage_path = orig_budget, orig_path
