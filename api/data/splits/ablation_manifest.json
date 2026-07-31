@@ -1,0 +1,114 @@
+{
+  "name": "ablation set",
+  "source": "pool_minus_heldout",
+  "seed": 20260731,
+  "provenance": "从「单标签可表达池 − eval − smoke」按档配额抽取（A9 批准）。与 dev / eval 并列，是第三份独立子集，不是 dev 的子集。",
+  "disjoint_from": [
+    "eval",
+    "smoke"
+  ],
+  "disjoint_verified": true,
+  "tier3_constraint": "Tier 3（dev_error_analysis）经验对仍只准来自 dev split —— 消融集扩大**不**放宽这一条（A9 条件 3）。",
+  "confusing": {
+    "n": 90,
+    "by_tier": {
+      "definitional_compositional": 30,
+      "definitional": 60
+    },
+    "by_pair": {
+      "definitional_compositional": {
+        "1/13": 4,
+        "11/25": 4,
+        "14/16": 4,
+        "4/17": 4,
+        "6/15": 4,
+        "7/27": 4,
+        "31/32": 3,
+        "33/34": 3
+      },
+      "definitional": {
+        "2/12": 12,
+        "3/18": 12,
+        "5/19": 12,
+        "7/24": 12,
+        "8/23": 12
+      }
+    },
+    "by_country": {
+      "BD": 4,
+      "IN": 14,
+      "LK": 63,
+      "PK": 9
+    },
+    "by_language": {
+      "en_only": 20,
+      "local_only": 9,
+      "mixed": 45,
+      "na": 16
+    },
+    "by_gold": {
+      "1": 4,
+      "2": 6,
+      "3": 3,
+      "7": 6,
+      "12": 6,
+      "14": 4,
+      "15": 4,
+      "17": 4,
+      "18": 9,
+      "19": 12,
+      "23": 12,
+      "24": 6,
+      "25": 4,
+      "27": 4,
+      "32": 3,
+      "34": 3
+    }
+  },
+  "control": {
+    "n": 90,
+    "by_tier": {
+      "non_confusing": 90
+    },
+    "by_pair": {},
+    "by_country": {
+      "BD": 4,
+      "IN": 14,
+      "LK": 63,
+      "PK": 9
+    },
+    "by_language": {
+      "en_only": 20,
+      "local_only": 9,
+      "mixed": 45,
+      "na": 16
+    },
+    "by_gold": {
+      "9": 5,
+      "20": 55,
+      "21": 13,
+      "28": 1,
+      "29": 16
+    }
+  },
+  "contrast_support": {
+    "B−A": {
+      "driven_by_tier": "definitional",
+      "n": 60,
+      "interpretable": true
+    },
+    "B2−B": {
+      "driven_by_tier": "definitional_compositional",
+      "n": 30,
+      "interpretable": true
+    },
+    "C−B2": {
+      "driven_by_tier": "dev_error_analysis",
+      "n": 0,
+      "interpretable": false
+    }
+  },
+  "pair_cap_ratio": 0.5,
+  "methods_wording": "B−A 的结论仅覆盖本次实际抽到的混淆对组合（见 confusing.by_pair），不得表述为「在所有阈值型混淆对上成立」。Tier 3 经验对尚未积累，C−B2 该对比留待后续。",
+  "overlap_with_held_out": 0
+}

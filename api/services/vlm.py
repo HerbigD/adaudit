@@ -193,7 +193,11 @@ class MockVLM(BaseVLM):
         stem = Path(image_path).stem.lower()
         rng = random.Random(stem)
 
-        # 优先从混淆对里挑，保证 mock 数据能打到 eval 关注的那几对
+        # 优先从混淆对里挑，保证 mock 数据能打到 eval 关注的那几对。
+        # 但**品名一旦写死就必须配套写死混淆对** —— 下面几个分支都这么做了。
+        # 教训：曾经让 "Mock Cereal 500g" 随机落到 (7,24)（咸味酱 vs 高脂酱），
+        # 于是裁决按 Annex 4 的酱类阈值去判一盒麦片，规则正确地拒绝判定，
+        # 测试却红了。假数据自相矛盾时，红的是测试，不是被测代码。
         pair = rng.choice(list(tx.confusing_pairs))
         code = pair[0]
         gid = tx.specifics[code].parent_id
@@ -213,12 +217,15 @@ class MockVLM(BaseVLM):
         elif "serving" in stem:
             spec, gen, ident = 0.55, 0.86, True
             brand, pname = "ServingBrand", "Morning Cereal 375g"
+            code, gid, pair = 2, 1, (2, 12)
         elif "parent" in stem:
             spec, gen, ident = 0.48, 0.93, True
             brand, pname = "MockBrand", "Mock Cereal 500g"
+            code, gid, pair = 2, 1, (2, 12)          # 麦片就得落在谷物对上
         elif "low" in stem:
             spec, gen, ident = 0.55, 0.85, True
             brand, pname = "MockBrand", "Mock Crunchy Cereal 500g"
+            code, gid, pair = 2, 1, (2, 12)
         else:
             spec, gen, ident = 0.93, 0.97, True
             brand, pname = "MockBrand", "Mock Product"
@@ -289,6 +296,22 @@ def json_mode_state() -> dict[str, bool]:
     return dict(_JSON_MODE_SUPPORTED)
 
 
+# OpenAI 兼容协议的硬性要求：用 json_object 模式时，messages 里必须出现 "json" 字样。
+# 这条**不是**"模型不支持 JSON mode"，是我们自己 prompt 写漏了 —— 必须区别对待，
+# 否则一次可修复的 400 会被误记成"该模型永久不支持"，白丢一层结构化保障。
+_JSON_WORD_REQUIRED = re.compile(r"must contain the word ['\"]?json", re.I)
+
+
+def _ensure_json_word(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """保证 messages 里出现 "json" 字样。已有则原样返回。"""
+    blob = json.dumps(messages, ensure_ascii=False).lower()
+    if "json" in blob:
+        return messages
+    return messages + [
+        {"role": "system", "content": "Respond with a single valid JSON object."}
+    ]
+
+
 async def dashscope_chat(
     messages: list[dict[str, Any]],
     *,
@@ -317,6 +340,9 @@ async def dashscope_chat(
     key = f"{settings.dashscope_base_url}|{model}"
     use_json = want_json and settings.qwen_json_mode != "off" and _JSON_MODE_SUPPORTED.get(key, True)
 
+    if use_json:
+        messages = _ensure_json_word(messages)
+
     def build(with_json: bool) -> dict[str, Any]:
         p: dict[str, Any] = {
             "model": model,
@@ -339,11 +365,21 @@ async def dashscope_chat(
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(url, json=build(use_json), headers=headers)
         if r.status_code == 400 and use_json:
-            # JSON mode 不被该模型支持 —— 记住，改走 prompt 契约 + 运行时校验
-            logger.warning("模型 %s 拒绝 response_format，降级到 prompt 契约：%s",
-                           model, r.text[:200])
-            _JSON_MODE_SUPPORTED[key] = False
-            r = await client.post(url, json=build(False), headers=headers)
+            if _JSON_WORD_REQUIRED.search(r.text):
+                # 是我们自己的 prompt 漏了 "json" 字样，**不是**模型不支持 —— 补上重试
+                logger.info("补 'json' 字样后重试 json_object 模式")
+                messages = messages + [
+                    {"role": "system", "content": "Respond with a single valid JSON object."}
+                ]
+                r = await client.post(url, json=build(True), headers=headers)
+                if r.status_code < 400:
+                    _JSON_MODE_SUPPORTED[key] = True
+            if r.status_code == 400:
+                # 到这里才是真不支持：记住并降级到 prompt 契约 + 运行时校验
+                logger.warning("模型 %s 拒绝 response_format，降级到 prompt 契约：%s",
+                               model, r.text[:200])
+                _JSON_MODE_SUPPORTED[key] = False
+                r = await client.post(url, json=build(False), headers=headers)
         elif use_json and r.status_code < 400:
             _JSON_MODE_SUPPORTED.setdefault(key, True)
         if r.status_code >= 400:
@@ -484,7 +520,8 @@ async def probe_model() -> dict[str, Any]:
     out: dict[str, Any] = {"provider": settings.vlm_provider, "model": model}
     try:
         text, raw = await dashscope_chat(
-            [{"role": "user", "content": 'Reply with exactly {"ok":true}'}],
+            [{"role": "user",
+              "content": 'Reply with exactly this JSON object and nothing else: {"ok":true}'}],
             model=model, want_json=True, timeout=30,
         )
         out.update(reachable=True, sample=text[:80],

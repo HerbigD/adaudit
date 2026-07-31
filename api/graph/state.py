@@ -106,7 +106,13 @@ class Classification(BaseModel):
         return f"[{self.specific_code}] {self.specific_name}"
 
 
-Nutrient = Literal["sugar", "fat", "fiber", "sodium", "protein"]
+# Annex 4 的判据用到 saturated fat 与 energy(kJ)，Day6 补进来；
+# sodium 一律在**钠空间**比较，不再换算成盐（Annex 4 全部用 sodium）
+Nutrient = Literal[
+    "sugar", "fat", "saturated_fat", "fiber", "sodium", "protein", "energy_kj"
+]
+# per_100g / per_100ml 用于 cereals·dairy·sauces·soups；per_serve 用于 meals·snacks
+Basis = Literal["per_100g", "per_100ml", "per_serve", "unknown"]
 SourceType = Literal["official", "ecommerce", "nutrition_db", "cache", "other"]
 
 
@@ -116,7 +122,10 @@ class NutrientValue(BaseModel):
     nutrient: Nutrient
     value: float
     unit: str                       # 原始单位照录，如 "g/100ml" "mg/100g"
+    basis: Basis = "unknown"        # 原始读数的基准
     normalized: float | None = None  # 统一到 g/100g（固体）或 g/100ml（液体）
+    per_serve: float | None = None   # 每份值；Annex 4 的 meals/snacks 判据要它
+    serving_size_g: float | None = None
     confidence: float = 0.7
 
 
@@ -145,10 +154,18 @@ class Evidence(BaseModel):
 
     # ---------- 读取 ----------
     def get(self, nutrient: Nutrient) -> float | None:
-        """取 normalized 值；没有 normalized（缺份量等）返回 None。"""
+        """取 per-100g/ml 值；换算不出返回 None。"""
         for nv in self.nutrients:
             if nv.nutrient == nutrient and nv.normalized is not None:
                 return nv.normalized
+        return None
+
+    def per_serve(self, nutrient: Nutrient) -> float | None:
+        """取每份值。Annex 4 判 meals(8/23) 与 snacks(9) 用的是 per serve，
+        拿不到就必须转人工 —— 不许拿 per-100g 顶替。"""
+        for nv in self.nutrients:
+            if nv.nutrient == nutrient and nv.per_serve is not None:
+                return nv.per_serve
         return None
 
     def raw(self, nutrient: Nutrient) -> NutrientValue | None:

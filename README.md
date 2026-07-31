@@ -202,8 +202,13 @@ event: done         data: {"final":{...},"route":"direct_verified","human_choice
 ## 测试
 
 ```bash
-cd api && pytest -q      # 61 passed
+cd api && pytest -q      # 207 passed
 ```
+
+⚠️ **测试永不打真实 API**（OPEN-RISK-02）。`tests/conftest.py` 在 import 期把
+`APP_ENV / VLM_PROVIDER / LLM_PROVIDER / SEARCH_PROVIDER` 全部按成 mock、抹掉 key，
+并在 `httpx` 上挂了出站熔断 —— 即使 `.env` 是 `dev + qwen` 也不会发出任何真实请求。
+需要真实调用的用例标 `@pytest.mark.realapi`，用 `pytest --realapi` 单独跑。
 
 | 文件 | 覆盖 |
 |---|---|
@@ -214,6 +219,11 @@ cd api && pytest -q      # 61 passed
 | `test_eval_guard.py` | eval runner 的 mock 前置/后置断言 |
 | `test_graph_flow.py` | 四条路径端到端 + trace 完整性 + adapter 标记 |
 | `test_search_chain.py` | Day5 §8 七组：失败态/冲突判定/单位换算/降级/预算/多语言/域名表 |
+| `test_provider_isolation.py` | OPEN-RISK-02：provider 强制 mock + 出站熔断 + ledger 零累计 |
+| `test_annex4_rules.py` | Annex 4 阈值逐条、per-serve 口径、边界规则、7/24 适用范围 |
+| `test_split.py` | A2 切分：互斥 / 分层 / 可复现 / 扩容稳定 / manifest 口径 |
+| `test_ablation_set.py` | A9 消融集：与 eval·smoke 互斥断言、抽样清单、按档支撑量 |
+| `test_eval_slices_and_ablation.py` | D3 描述性切片、混淆对分档报告、DiD 差分逻辑 |
 
 ---
 
@@ -240,6 +250,33 @@ cd api && pytest -q      # 61 passed
 - 多语言界面
 - 独立部署的 Agent 服务（当前 LangGraph 嵌在 FastAPI 进程内，W6 红线是全链路串通）
 - 视频/动态广告素材
+
+## 评测集口径（Methods 用语，逐条已裁决）
+
+三份子集**互相独立**，不是包含关系：
+
+| 子集 | 规模 | 来源 | 用途 |
+|---|---|---|---|
+| `dev` | 200 | 单标签可表达池分层抽样 | 调参、误差分析；Tier 3 经验混淆对**只准**从这里来 |
+| `eval` | 300 | 同上，与 dev 互斥 | held-out，出终版指标前只跑一次 |
+| `smoke` | 12 | 覆盖优先（四国 + 五语种） | 链路自测，结果永不进指标 |
+| **ablation set** | 90 + 90 对照 | 「池 − eval − smoke」按档配额抽取 | A3 四臂消融；与 eval/smoke 严格互斥（代码断言） |
+
+切分种子 `SPLIT_SEED = 20260731` 写在 `config.py`，`data/splits/manifest.json`
+记录解析后的实际种子与分布，切分可完整复现。
+
+**三条必须写进 Methods 的口径**：
+
+1. **22/32**：Annex 4 中两者定义逐字相同，**标注与评测均按 32 计**。
+   单标签池中 gold=22 共 80 张（1.6%），指标一律用 `gold_specific` 列（已合并）。
+2. **超市类 35/36/37 不纳入分类体系**，维持 33 类。数据集 GT 中 gold ∈ {35,36,38}
+   的 27 张（0.55%）parked 在 `data/splits/unrepresentable_gold.csv`，
+   **不进任何指标**，eval 之后再决定去留。
+3. **切片指标为描述性**，不构成跨组对比结论。四国样本量不均衡
+   （Sri Lanka 约 74%，其余三国合计约 26%）反映的是广告投放现实；
+   India / Pakistan 层 n 在 20–30 量级，仅供描述，跨国显著性检验留作未来工作。
+
+---
 
 ## 数据合规
 

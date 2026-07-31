@@ -50,6 +50,7 @@ class SpecificCategory:
     confusable_with: tuple[int, ...] = ()
     confirmed: bool = False
     merge_note: str | None = None
+    thresholds: dict | None = None      # Annex 4 逐字判据 + 机器可判规则
 
     @property
     def needs_evidence(self) -> bool:
@@ -115,14 +116,17 @@ def load() -> Taxonomy:
             confusable_with=_tuple(s.get("confusable_with")),
             confirmed=bool(s.get("confirmed", False)),
             merge_note=s.get("merge_note"),
+            thresholds=s.get("thresholds"),
         )
 
-    pairs: list[tuple[int, int]] = []
-    notes: dict[tuple[int, int], str] = {}
-    for p in raw.get("confusing_pairs", []):
-        a, b = sorted(p["pair"])
-        pairs.append((a, b))
-        notes[(a, b)] = f"{p.get('dimension', '')}｜{p.get('note', '')}".strip("｜")
+    # 混淆对分三档（人类 07-31 裁决①），`source` 字段必填：
+    #   Tier 1 definitional               —— 从 thresholds 自动推导，共享数值切分线。见 `_derive_pairs`
+    #   Tier 2 definitional_compositional —— Annex 4 定义决定但判据是组成/形态，在 json 里显式登记
+    #   Tier 3 dev_error_analysis         —— 只能经 register_empirical_pair() 从 dev split 注入
+    pairs, notes = _derive_pairs(specifics)
+    comp_pairs, comp_notes = _load_compositional(raw, specifics)
+    pairs = tuple(pairs) + comp_pairs
+    notes.update(comp_notes)
 
     tx = Taxonomy(
         version=raw["meta"].get("version", "unknown"),
@@ -134,6 +138,152 @@ def load() -> Taxonomy:
     )
     _validate(tx)
     return tx
+
+
+PAIR_SOURCE: dict[tuple[int, int], str] = {}
+# 推导副产物：每对的判定营养维度（已映射成 Evidence 的 Nutrient 名）
+PAIR_DIMS: dict[tuple[int, int], tuple[str, ...]] = {}
+
+# thresholds 里的字段名 → Evidence 的 Nutrient 名。
+# 值为 None 表示"不是营养表里的读数"（如果汁百分比要读配料表），
+# 不能用于 Day5 的跨源冲突判定。
+_TH_TO_NUTRIENT: dict[str, str | None] = {
+    "sugar": "sugar",
+    "fiber": "fiber",
+    "fat": "fat",
+    "saturated_fat": "saturated_fat",
+    "sodium_mg": "sodium",
+    "energy_kj": "energy_kj",
+    "protein": "protein",
+    "fruit_pct": None,
+}
+
+_OPPOSITE = {"<": {">", ">="}, "<=": {">", ">="}, ">": {"<", "<="}, ">=": {"<", "<="}}
+
+# 混淆对的判定字段中文名 —— 只用于给人看的 note，模型侧 prompt 走 thresholds 的英文原文
+_TH_LABEL_ZH = {
+    "sugar": "糖", "fiber": "膳食纤维", "fat": "脂肪", "saturated_fat": "饱和脂肪",
+    "sodium_mg": "钠", "energy_kj": "能量", "protein": "蛋白质", "fruit_pct": "果汁含量",
+}
+
+# 判定字段不在营养表里的混淆对：它们是真对，但 Day5 的跨源冲突判定天然对它们失效
+# （果汁百分比要读配料表）。登记在这里，`_validate` 就不必每次启动都报一遍。
+PAIRS_WITHOUT_NUTRIENT_DIM: frozenset[tuple[int, int]] = frozenset({(3, 18)})
+
+
+def _rules_of(th: dict | None) -> list[tuple[str, str, float]]:
+    """把 thresholds 块里的 all_of / any_of 摊平成 (nutrient, op, value) 列表。
+
+    只取这两个键 —— `cheese_rule` / `soup_rule` 之类是**同一类内部的形态分支**，
+    不是两类之间的切分点，拿它们配对会推出假对。
+    """
+    out: list[tuple[str, str, float]] = []
+    for key in ("all_of", "any_of"):
+        for item in (th or {}).get(key, []) or []:
+            if isinstance(item, (list, tuple)) and len(item) == 3:
+                out.append((str(item[0]), str(item[1]), float(item[2])))
+    return out
+
+
+def _derive_pairs(specifics: dict[int, SpecificCategory]):
+    """从 taxonomy 结构推导 definitional 混淆对 —— 人工零介入，来源可审计。
+
+    **判据：两类在同一营养素、同一 basis 上给出方向相反、切分点相同的阈值。**
+    例：2 是 `sugar < 20`、12 是 `sugar > 20` —— 它们共用一条线，
+    线两侧长得一样、只有营养表能分开，这就是"视觉不可区分"的定义级证据。
+
+    这样推出来的对，其混淆性是**Annex 4 定义的推论**，
+    不是从标注数据的 confusion matrix 里挖出来的经验，进 prompt 不构成信息泄漏
+    （Day6 A3 决议）。经验对只能来自 dev split，走 `register_empirical_pair()`。
+
+    ## 为什么换掉了上一版规则
+
+    上一版判据是「同父类 + `key_dimensions` 相同 + 双方都有 thresholds」。它有两个毛病：
+
+    - **推出假对**：8/23/24 同属父类 6、`key_dimensions` 都是 ['脂肪','盐']，于是
+      (8,24) 和 (23,24) 被当成混淆对。但 8/23 按 **per serve** 的饱和脂肪+钠切分，
+      24 按 **per 100g** 的总脂肪切分 —— 两者没有共享的判定线，24 与 8/23 之分
+      是产品形态（餐食 vs 酱料/汤）而非阈值，模型拿营养表分不开也不该去分。
+    - **漏掉真对**：7（低脂咸味酱 <10g fat/100g）与 24（高脂咸味酱 >10g fat/100g）
+      共用同一条 10g 线，是最干净的定义级混淆对，却因为分属父类 8 与 6 被挡在门外。
+      Annex 4 的父类分组是按"健康/不健康"编排的，不是按视觉相似度，拿它当判据是错的。
+
+    新规则同时修好这两处，且推导结果与 `nutrient_rules._PAIR_RULES` 天然对齐。
+    """
+    pairs, notes = [], {}
+    codes = sorted(specifics)
+    for i, a in enumerate(codes):
+        for b in codes[i + 1:]:
+            sa, sb = specifics[a], specifics[b]
+            if not (sa.thresholds and sb.thresholds):
+                continue
+            if sa.thresholds.get("basis") != sb.thresholds.get("basis"):
+                continue
+
+            shared: list[str] = []
+            for na, opa, va in _rules_of(sa.thresholds):
+                for nb, opb, vb in _rules_of(sb.thresholds):
+                    if na == nb and va == vb and opb in _OPPOSITE.get(opa, set()):
+                        if na not in shared:
+                            shared.append(na)
+            if not shared:
+                continue
+
+            pairs.append((a, b))
+            # note 用**共享的那条切分线**，不用 key_dimensions —— 后者是人工写的
+            # 品类描述（如 7 写的是"脂肪酸类型"），和实际把两类分开的那个字段不是一回事
+            notes[(a, b)] = "｜".join(_TH_LABEL_ZH.get(s, s) for s in shared)
+            PAIR_SOURCE[(a, b)] = "definitional"
+            PAIR_DIMS[(a, b)] = tuple(
+                n for n in (_TH_TO_NUTRIENT.get(s) for s in shared) if n
+            )
+    return tuple(pairs), notes
+
+
+def _load_compositional(raw: dict, specifics: dict[int, SpecificCategory]):
+    """读 Tier 2（definitional_compositional）—— 显式登记，不推导。
+
+    为什么不推导：这些对的判据是**组成/形态**（1/13 面条炸不炸、31/32 快餐是否只推健康款），
+    不是数值切分线。`_derive_pairs` 只认共享切分线，硬要把它们也推出来就得放宽判据，
+    而 A3 的整个论证依赖"混淆性是定义的推论"—— 判据放宽一分，那句话就弱一分。
+    所以分档，不混谈。
+
+    指向不存在编号的对**跳过并告警**，不静默丢：数据侧原清单里的 (35,36)
+    就属于这种（本 taxonomy 只到 34），见 OPEN-QUESTIONS 的 A4。
+    """
+    block = raw.get("compositional_pairs") or {}
+    pairs: list[tuple[int, int]] = []
+    notes: dict[tuple[int, int], str] = {}
+    for item in block.get("pairs", []):
+        a, b = sorted(item["pair"])
+        missing = [c for c in (a, b) if c not in specifics]
+        if missing:
+            logger.warning(
+                "compositional_pairs 里的 (%s,%s) 指向不存在的编号 %s，已跳过", a, b, missing
+            )
+            continue
+        source = item.get("source")
+        if not source:
+            raise ValueError(f"compositional_pairs 的 ({a},{b}) 缺 source 字段（裁决①要求必填）")
+        pairs.append((a, b))
+        notes[(a, b)] = item.get("criterion") or item.get("note", "")
+        PAIR_SOURCE[(a, b)] = source
+    return tuple(pairs), notes
+
+
+def register_empirical_pair(a: int, b: int, note: str = "") -> None:
+    """注入经验混淆对。**只准来自 dev split**，报指标时必须声明（A3 决议）。"""
+    tx = load()
+    key = tuple(sorted((a, b)))
+    if key in tx.confusing_pairs:
+        return
+    object.__setattr__(tx, "confusing_pairs", tx.confusing_pairs + (key,))
+    tx.pair_notes[key] = note or "dev 误差分析"
+    PAIR_SOURCE[key] = "dev_error_analysis"
+
+
+def pair_source(a: int, b: int) -> str:
+    return PAIR_SOURCE.get(tuple(sorted((a, b))), "unknown")
 
 
 def _validate(tx: Taxonomy) -> None:
@@ -173,10 +323,20 @@ def _validate(tx: Taxonomy) -> None:
         )
 
     # 每个混淆对都要有判定维度，否则 Day5 的冲突判定对它形同虚设
-    uncovered = [p for p in tx.confusing_pairs if p not in PAIR_NUTRIENTS]
+    # Tier 2（definitional_compositional）天然没有营养维度 —— 它们的判据就是组成/形态，
+    # 不是数字。对它们告警等于每次启动都刷 8 行噪音，且会淹没真正该看的那一条。
+    uncovered = [
+        p
+        for p in tx.confusing_pairs
+        if PAIR_SOURCE.get(p) != "definitional_compositional"
+        and not (PAIR_DIMS.get(p) or PAIR_NUTRIENTS.get(p))
+        and p not in PAIRS_WITHOUT_NUTRIENT_DIM
+    ]
     if uncovered:
-        raise ValueError(
-            f"PAIR_NUTRIENTS 缺少这些混淆对的判定维度: {uncovered}（见 services/taxonomy.py）"
+        logger.warning(
+            "这些混淆对没有可用的判定维度（冲突判定对它们失效）: %s —— "
+            "definitional 对应由 Annex 4 阈值自动推出，经验对需在 PAIR_NUTRIENTS 里补",
+            uncovered,
         )
 
     unconfirmed = [c for c, s in tx.specifics.items() if not s.confirmed]
@@ -288,16 +448,31 @@ ALCOHOL_CODES: frozenset[int] = frozenset({26})
 # --------------------------------------------------------------------------- #
 # 混淆对 → 判定维度（Day5 §6 冲突判定条件 3）
 # --------------------------------------------------------------------------- #
-# 同样是**显式表**而不是从 key_dimensions 的中文串猜（教训见 HFSS_VERDICTS 上面那段）。
-# 覆盖性由 `_validate` 强制：taxonomy.json 新增混淆对而这里没写，启动即报错。
+# definitional 对的维度**自动来自 Annex 4 阈值**（`PAIR_DIMS`，由 `_derive_pairs` 填），
+# 不再手抄 —— 手抄过一次就错过一次：旧表里 (8,23) 写的是 ("fat","sodium")，
+# 而 Annex 4 用的是 **saturated fat**，写错的那一维在冲突判定里等于静默失效。
+#
+# 下表只保留**经验对**（`register_empirical_pair` 注入的，来自 dev split）的维度，
+# 因为它们没有 Annex 4 阈值可推。这里仍然是**显式表**而不是从 key_dimensions 的
+# 中文串猜（教训见 HFSS_VERDICTS 上面那段）。
+#
+# 三对当前不在推导结果里、留在这儿备查：Annex 4 对它们**没有给数值切分点**，
+#   (16,17) 甜零食 vs 咸零食 —— 靠品类形态，不靠营养表
+#   (18,25) 果汁饮料 vs 含糖饮料 —— 靠果汁百分比（配料表，非营养表）
+#   (25,29) 含糖饮料 vs 茶咖 —— 靠"是否加糖"，同上
+# 它们要进 prompt 必须走 `register_empirical_pair()` 并标 source=dev_error_analysis。
 PAIR_NUTRIENTS: dict[tuple[int, int], tuple[str, ...]] = {
-    (2, 12): ("sugar", "fiber"),
-    (5, 19): ("fat",),
-    (8, 23): ("fat", "sodium"),
     (16, 17): ("sugar", "sodium"),
     (18, 25): ("sugar",),
     (25, 29): ("sugar",),
 }
+
+
+def pair_dimensions(a: int, b: int) -> tuple[str, ...]:
+    """单对的判定维度：先查 Annex 4 推导结果，再退回经验对的显式表。"""
+    key = (a, b) if a < b else (b, a)
+    load()          # 确保 PAIR_DIMS 已填充
+    return PAIR_DIMS.get(key) or PAIR_NUTRIENTS.get(key, ())
 
 
 def pair_nutrients(codes: Any = None) -> tuple[str, ...]:
@@ -310,9 +485,9 @@ def pair_nutrients(codes: Any = None) -> tuple[str, ...]:
         return ()
     have = {c for c in codes if isinstance(c, int)}
     out: list[str] = []
-    for (a, b), dims in PAIR_NUTRIENTS.items():
+    for a, b in load().confusing_pairs:
         if a in have and b in have:
-            out.extend(d for d in dims if d not in out)
+            out.extend(d for d in pair_dimensions(a, b) if d not in out)
     return tuple(out)
 
 
@@ -402,13 +577,50 @@ def taxonomy_block() -> str:
     return "\n".join(lines).strip()
 
 
-def confusing_pairs_block() -> str:
+# --------------------------------------------------------------------------- #
+# A3 消融：prompt 里放哪些混淆对
+# --------------------------------------------------------------------------- #
+# 四臂（人类裁决①后从三臂拆开）。**Tier 2 必须单独占一臂**，
+# 否则 B→C 的差值把"组成级先验"和"经验先验"搅在一起，谁也说不清是哪个在起作用。
+#
+#   A  —— 一对都不放。回答"置信度信号是模型内生的，还是我们喂出来的"
+#   B  —— 仅 Tier 1（definitional，共享数值切分线）。阈值级先验值多少
+#   B2 —— Tier 1 + Tier 2（+ definitional_compositional）。**线上默认**
+#   C  —— 全部三档。经验先验再加多少；**只准在 held-out 上报**
+#
+# 可读的对比：B−A = 阈值先验；B2−B = 组成先验；C−B2 = 经验先验。
+ARM_TIERS: dict[str, tuple[str, ...]] = {
+    "A": (),
+    "B": ("definitional",),
+    "B2": ("definitional", "definitional_compositional"),
+    "C": ("definitional", "definitional_compositional", "dev_error_analysis"),
+}
+PairsArm = str
+
+
+def pairs_for_arm(arm: str = "B2") -> tuple[tuple[int, int], ...]:
+    """按消融臂过滤混淆对。未知 arm 一律按 B2 处理（保守：不泄漏经验对）。"""
+    tiers = ARM_TIERS.get((arm or "").upper() if arm else "", None)
+    if tiers is None:
+        tiers = ARM_TIERS["B2"]
+    return tuple(p for p in load().confusing_pairs if PAIR_SOURCE.get(p) in tiers)
+
+
+def pairs_by_tier() -> dict[str, list[tuple[int, int]]]:
+    """按 source 分组 —— 报指标时 Tier 1 与 Tier 2 必须分开声明（裁决①）。"""
+    out: dict[str, list[tuple[int, int]]] = {}
+    for p in load().confusing_pairs:
+        out.setdefault(PAIR_SOURCE.get(p, "unknown"), []).append(p)
+    return out
+
+
+def confusing_pairs_block(arm: str = "B") -> str:
     tx = load()
     parts = []
-    for a, b in tx.confusing_pairs:
+    for a, b in pairs_for_arm(arm):
         dim = tx.pair_notes.get((a, b), "").split("｜")[0]
         parts.append(f"[{a}]vs[{b}]({dim})")
-    return "; ".join(parts)
+    return "; ".join(parts) or "(none supplied — judge confusability yourself)"
 
 
 CLASSIFY_SYSTEM_PROMPT = """You audit online food advertisements for nutrition policy compliance.
@@ -478,10 +690,29 @@ Return ONLY the same JSON object as the initial classification, plus:
 """
 
 
-def build_classify_prompt(few_shots: list[str] | None = None) -> str:
-    prompt = CLASSIFY_SYSTEM_PROMPT.format(
-        taxonomy=taxonomy_block(), pairs=confusing_pairs_block()
+def thresholds_block() -> str:
+    """Annex 4 的数值判据，英文原样进 prompt（Day6 B1 决议）。"""
+    tx = load()
+    return "\n".join(
+        f"[{c}] {tx.specifics[c].thresholds['verbatim']}"
+        for c in sorted(tx.specifics)
+        if tx.specifics[c].thresholds and tx.specifics[c].thresholds.get("verbatim")
     )
+
+
+def build_classify_prompt(
+    few_shots: list[str] | None = None, pairs_arm: str | None = None
+) -> str:
+    from config import settings
+
+    arm = pairs_arm or settings.pairs_arm
+    prompt = CLASSIFY_SYSTEM_PROMPT.format(
+        taxonomy=taxonomy_block(), pairs=confusing_pairs_block(arm)
+    )
+    prompt += ("\n\nOFFICIAL NUMERIC CUT-OFFS (protocol Annex 4 — these decide the "
+               "confusable pairs; you usually CANNOT read them off a photo, so when a "
+               "category below applies, report low specific_confidence and let the "
+               "system retrieve the nutrition panel):\n" + thresholds_block())
     if few_shots:
         prompt += (
             "\n\nCORRECTED EXAMPLES (human corrections on similar ads — follow the correction):\n"
@@ -490,10 +721,16 @@ def build_classify_prompt(few_shots: list[str] | None = None) -> str:
     return prompt
 
 
-def build_adjudicate_prompt() -> str:
+def build_adjudicate_prompt(pairs_arm: str | None = None) -> str:
+    from config import settings
+
+    arm = pairs_arm or settings.pairs_arm
     return ADJUDICATE_SYSTEM_PROMPT.format(
-        taxonomy=taxonomy_block(), pairs=confusing_pairs_block()
-    )
+        taxonomy=taxonomy_block(), pairs=confusing_pairs_block(arm)
+    ) + ("\n\nOFFICIAL NUMERIC CUT-OFFS (protocol Annex 4 — apply these literally; "
+         "cereals/dairy/sauces/soups are judged per 100g, meals and snacks PER SERVE; "
+         "if serving size is unknown, say so and keep confidence low):\n"
+         + thresholds_block())
 
 
 # --------------------------------------------------------------------------- #
@@ -552,8 +789,15 @@ def cascade() -> dict[str, Any]:
             }
             for s in sorted(tx.specifics.values(), key=lambda x: x.stable_code)
         ],
+        # A3 决议：每对必须自带 `source`。definitional = 从 Annex 4 阈值推出、零标注介入；
+        # dev_error_analysis = 从 dev split 的误差分析来，报指标时必须声明。
         "confusing_pairs": [
-            {"pair": [a, b], "note": tx.pair_notes.get((a, b), "")}
+            {
+                "pair": [a, b],
+                "note": tx.pair_notes.get((a, b), ""),
+                "source": PAIR_SOURCE.get((a, b), "unknown"),
+                "dimensions": list(pair_dimensions(a, b)),
+            }
             for a, b in tx.confusing_pairs
         ],
     }

@@ -58,9 +58,12 @@ class Settings(BaseSettings):
     daily_token_budget: int = 500_000
     usage_path: str = str(DATA_DIR / "usage.json")
     # 成本估算配置化。币种跟随百炼账单：中国站 = CNY、国际站 = USD，只改配置不改代码。
-    llm_price_in_per_mtok: float = 2.0
-    llm_price_out_per_mtok: float = 8.0
-    cost_currency: str = "CNY"
+    # 百炼是阶梯价（按上下文长度分档），这里只填一个数 —— 填实际会落到的那一档。
+    # 默认值 = qwen3.7-plus 国际站最短档（$0.32/$1.28 per Mtok，2026-07）；
+    # 本项目 prompt 约 1.5k–4k token，落最短档，所以估算值是**下限**。
+    llm_price_in_per_mtok: float = 0.32
+    llm_price_out_per_mtok: float = 1.28
+    cost_currency: str = "USD"
 
     # ---------- 搜索后端 ----------
     # dashscope = 百炼内置联网（复用同一把 key）；mock = 离线假数据
@@ -104,6 +107,22 @@ class Settings(BaseSettings):
     # 单一事实来源，代码里不另造分类数据
     taxonomy_path: str = str(Path(__file__).resolve().parent / "data" / "taxonomy.json")
     taxonomy_prompt_token_budget: int = 2000
+
+    # ---------- A3 消融：prompt 里放哪些混淆对 ----------
+    # A  = 不放任何对（回答"置信度信号是不是模型内生的"）
+    # B  = 仅 Tier 1 definitional（共享数值切分线，从 Annex 4 阈值自动推出）
+    # B2 = Tier 1 + Tier 2 definitional_compositional —— **线上默认**
+    # C  = 再加 Tier 3 dev 经验对（只准在 held-out 上报，且报告里必须声明）
+    pairs_arm: Literal["A", "B", "B2", "C"] = "B2"
+
+    # ---------- A2 数据切分（Day6 决议） ----------
+    # 单标签金标池 → dev 200 / eval 300，按 country（有 language 时再叠 language）分层。
+    # **种子写进配置**：切分必须可复现，否则"我们没看过测试集"这句话无从验证。
+    split_seed: int = 20260731
+    split_dev_size: int = 200
+    split_eval_size: int = 300
+    split_smoke_size: int = 12          # 冒烟集，与 dev/eval 互斥
+    split_dir: str = str(Path(__file__).resolve().parent / "data" / "splits")
 
     # ---------- 存储 ----------
     db_path: str = str(DATA_DIR / "adaudit.db")
