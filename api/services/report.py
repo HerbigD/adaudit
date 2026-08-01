@@ -104,6 +104,10 @@ def aggregate(batch_id: str) -> dict[str, Any]:
                 "reviewed 太小时该值不可解读。"
             ),
             "by_match_mode": dict(Counter(h["match_mode"] or "unknown" for h in hit_rows)),
+            # 同一批里混了两种 backend 说明中途降级过，那批数字要分开看
+            "by_cache_backend": dict(
+                Counter(h["cache_backend"] or "unknown" for h in hit_rows)
+            ),
             "by_provenance": dict(Counter(h["provenance"] or "unknown" for h in hit_rows)),
         },
     }

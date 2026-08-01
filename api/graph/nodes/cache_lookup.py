@@ -14,7 +14,7 @@ import db
 from config import settings
 from graph import events
 from graph.state import AuditState
-from services import cache_store
+from services import cache_store, vectorstore
 
 
 async def cache_lookup(state: AuditState) -> dict:
@@ -28,6 +28,9 @@ async def cache_lookup(state: AuditState) -> dict:
         await events.emit_log("cache_lookup", "正在查询产品知识缓存库…")
         record, score = cache_store.lookup(initial.brand, initial.product_name)
         mode = settings.cache_match_mode
+        # backend 必须跟着每一条命中/未命中走：difflib 下语义分不可靠，
+        # 两种 backend 的命中率放在一起比是没有意义的
+        backend = vectorstore.backend()
         rejected = (record or {}).get("strict_reject_reason")
 
         if rejected:
@@ -40,6 +43,7 @@ async def cache_lookup(state: AuditState) -> dict:
             )
             t.extra = {
                 "match_mode": mode,
+                "cache_backend": backend,
                 "strict_rejected": True,
                 "reject_reason": rejected,
                 "near_miss_cache_id": record.get("id"),
@@ -64,6 +68,7 @@ async def cache_lookup(state: AuditState) -> dict:
                 "hit_count": record.get("hit_count", 0),
                 "score": round(score, 3),
                 "match_mode": mode,
+                "cache_backend": backend,
             }
             if not verified:
                 # 不是失败，但要在轨迹里留痕：这条证据没人核过
@@ -79,6 +84,7 @@ async def cache_lookup(state: AuditState) -> dict:
                     round(score, 4),
                     provenance,
                     mode,
+                    backend,
                 )
             await events.emit_log(
                 "cache_lookup", f"缓存命中：{record['product_name']}（{tag}）— 免搜索"
@@ -91,7 +97,7 @@ async def cache_lookup(state: AuditState) -> dict:
                 "trace": [t],
             }
 
-        t.extra = {"match_mode": mode, "score": round(score, 3)}
+        t.extra = {"match_mode": mode, "cache_backend": backend, "score": round(score, 3)}
         t.summary = f"缓存未命中（best score={score:.2f}）"
         await events.emit_log("cache_lookup", "缓存未命中，转联网搜索")
         return {"cache_hit": False, "cache_provenance": None, "trace": [t]}

@@ -437,4 +437,7 @@ def stats() -> dict[str, Any]:
         "human_verified": row["verified"],
         "superseded": row["superseded"],
         "backend": vectorstore.backend(),
+        # 降级了就把原因摆在指标旁边 —— 否则"命中率 0.05"会被当成缓存没用，
+        # 而真相可能是向量库根本没在工作
+        "backend_degrade_reason": vectorstore.degrade_reason(),
     }
