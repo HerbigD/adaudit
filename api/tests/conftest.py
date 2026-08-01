@@ -51,7 +51,10 @@ from config import settings
 # --------------------------------------------------------------------------- #
 # 存储隔离 —— import 期生效
 # --------------------------------------------------------------------------- #
-_TMP = Path(tempfile.mkdtemp(prefix="adaudit-tests-"))
+# 本轮测试的隔离根目录。**对外导出**：断言"路径确实被隔离了"要拿它做前缀比对，
+# 不能写死 "/tmp" —— macOS 的 TMPDIR 是 /var/folders/xx/...，Linux 才是 /tmp。
+TMP_ROOT = Path(tempfile.mkdtemp(prefix="adaudit-tests-"))
+_TMP = TMP_ROOT
 
 settings.db_path = str(_TMP / "adaudit.db")
 settings.checkpoint_db_path = str(_TMP / "checkpoints.db")
@@ -142,6 +145,39 @@ def _block_real_network(request, monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "send", _async_send, raising=False)
     monkeypatch.setattr(httpx.Client, "send", _sync_send, raising=False)
     yield
+
+
+# 用例之间必须保持不变的配置。任何一条被裸赋值改掉，后面所有用例都会受影响 ——
+# Day8 评审抓到的 `chroma_path` 泄漏就是这么发生的（改了不还原，
+# 后续用例全指着一个即将被删的目录，Linux 侥幸没炸、macOS 直接红）。
+#
+# 这里在每个用例后**无条件还原**，让下一条用例永远从干净状态开始。
+# 单条用例内要改，请用 `monkeypatch.setattr` —— 它自己会还原，两层保险不冲突。
+#
+# 快照**全量字段**而不是维护一份白名单：白名单要人记得更新，漏一个的代价是
+# "整轮绿、单跑红"那类最难查的失败。Day8 新加的 `memory_enabled` 与
+# `cache_match_mode` 就都不在原来那份名单里 —— 而它们恰恰是最会被用例改的两个。
+#
+# 还原路径的同时必须**重置对应的单例**。向量库是进程级单例：只把
+# `settings.chroma_path` 改回来而不 reset，单例仍然指着那个即将被删的 tmp 目录,
+# 这正是 Day8 那个 bug 的后半截，上一版只修了前半截。
+# db 不在此列 —— `db.connect()` 每次现开连接，不持有路径。
+_SINGLETON_PATH_KEYS = frozenset({"chroma_path"})
+
+
+@pytest.fixture(autouse=True)
+def _no_settings_leak():
+    snapshot = {k: getattr(settings, k) for k in type(settings).model_fields}
+    yield
+    dirty = set()
+    for k, v in snapshot.items():
+        if getattr(settings, k) != v:
+            setattr(settings, k, v)
+            dirty.add(k)
+    if dirty & _SINGLETON_PATH_KEYS:
+        from services import vectorstore
+
+        vectorstore.reset()
 
 
 @pytest.fixture(scope="session", autouse=True)

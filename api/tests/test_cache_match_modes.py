@@ -190,7 +190,28 @@ def test_finalize_is_a_noop_for_audits_that_never_hit():
 # --------------------------------------------------------------------------- #
 # fallback 向量库跨进程可见性（Day7 实测踩到的缺陷）
 # --------------------------------------------------------------------------- #
-def test_fallback_vectorstore_picks_up_writes_from_another_process(tmp_path):
+@pytest.fixture
+def isolated_vectorstore(tmp_path, monkeypatch):
+    """把向量库指到本用例专属目录，**用完自动还原**。
+
+    Day8 评审指出的移植性缺陷就在这：原来是
+        settings.chroma_path = str(path)      # 裸赋值，永不还原
+    于是这条用例跑完之后，**全会话**的 `chroma_path` 都指着一个即将被删的 tmp 目录。
+    Linux 上它恰好排在靠后位置没炸；macOS 的 tmp 路径与用例顺序不同，整轮就会红一条。
+
+    这正是 conftest 修过的那类"测试污染"在单测内部的复发 ——
+    上次是库文件，这次是向量库路径。`monkeypatch` 会在用例结束时自动还原属性，
+    `vectorstore.reset()` 前后各调一次则保证单例不把旧路径带进来 / 带出去。
+    """
+    from services import vectorstore
+
+    monkeypatch.setattr(settings, "chroma_path", str(tmp_path / "chroma"))
+    vectorstore.reset()
+    yield tmp_path / "chroma"
+    vectorstore.reset()
+
+
+def test_fallback_vectorstore_picks_up_writes_from_another_process(isolated_vectorstore):
     """别的进程写进 fallback.json 的档案，本进程必须能看见。
 
     ## 这个缺陷长什么样
@@ -211,24 +232,21 @@ def test_fallback_vectorstore_picks_up_writes_from_another_process(tmp_path):
 
     from services import vectorstore
 
-    path = tmp_path / "chroma"
-    settings.chroma_path = str(path)
-    vectorstore.reset()
-
+    path = isolated_vectorstore
     col = vectorstore.collection("products")
-    col.upsert(ids=["a"], documents=["MockBrand | A"], metadatas=[{}])
+    # metadata 不能为空：chroma 拒绝空 dict，fallback 接受 —— 我们在
+    # `_validate_upsert` 里统一拦掉，免得同一段代码只在装了 chroma 的机器上炸
+    col.upsert(ids=["a"], documents=["MockBrand | A"], metadatas=[{"brand": "MockBrand"}])
     assert col.count() == 1
 
     # 模拟另一个进程：直接改盘上的 JSON，本进程不重启
     raw = json.loads((path / "fallback.json").read_text())
-    raw["products"]["b"] = {"document": "MockBrand | B", "metadata": {}}
+    raw["products"]["b"] = {"document": "MockBrand | B", "metadata": {"brand": "MockBrand"}}
     (path / "fallback.json").write_text(json.dumps(raw, ensure_ascii=False))
 
     assert col.count() == 2, "外部写入不可见 —— fallback 客户端没有按 mtime 重载"
     ids = vectorstore.collection("products").query(query_texts=["MockBrand | B"])["ids"][0]
     assert "b" in ids
-
-    vectorstore.reset()
 
 
 def test_score_ceiling_without_semantic_is_below_the_hit_threshold():

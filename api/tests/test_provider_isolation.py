@@ -36,6 +36,7 @@ from config import settings
 from conftest import (  # noqa: E402
     ENV_PROVIDER_SETTINGS,
     MOCKED_PROVIDER_SETTINGS,
+    TMP_ROOT,
     RealNetworkCallInTest,
 )
 
@@ -55,9 +56,17 @@ def test_api_keys_are_stripped():
 
 
 def test_storage_paths_are_not_the_production_ones():
+    """断言"落在 conftest 的隔离根里"，**不写死 /tmp**。
+
+    macOS 的 `TMPDIR` 是 `/var/folders/xx/.../T/`，写死 `/tmp` 在人类本机会红 ——
+    而那台机器才是真实验收环境。拿 `TMP_ROOT` 做前缀比对，两个平台都成立，
+    且比子串匹配更严：它证明的是"确实是这一轮建的那个目录"，
+    而不是"路径里碰巧有这几个字"。
+    """
+    root = str(TMP_ROOT)
     for path in (settings.db_path, settings.checkpoint_db_path,
                  settings.chroma_path, settings.usage_path):
-        assert "/tmp" in path or "adaudit-tests-" in path, path
+        assert path.startswith(root), f"{path} 不在隔离根 {root} 下"
 
 
 async def test_real_outbound_request_is_blocked():
