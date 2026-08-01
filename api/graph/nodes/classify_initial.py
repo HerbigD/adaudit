@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from graph import edges, events
 from graph.state import AuditState, Classification
+from config import settings
 from services import memory, taxonomy, usage, vlm
 
 
@@ -21,7 +22,12 @@ async def classify_initial(state: AuditState) -> dict:
 
         # few-shot 修正记忆注入：相似广告出现时把人工修正样例带进 prompt
         shots = memory.retrieve(state.get("ad_image", ""))
+        # 注入证据落 trace：开/关对比要能证明"确实注进去了什么"，
+        # 只记条数不够 —— 条数相同但内容不同的两次跑批看起来会一样。
+        t.extra["memory_enabled"] = settings.memory_enabled
+        t.extra["few_shots_injected"] = len(shots)
         if shots:
+            t.extra["few_shots"] = [s[:160] for s in shots]
             await events.emit_log("classify_initial", f"注入 {len(shots)} 条历史修正样例")
 
         try:
@@ -52,12 +58,15 @@ async def classify_initial(state: AuditState) -> dict:
         route = edges.decide_route_1({**state, "initial": initial})
 
         t.adapter = initial.adapter
-        t.extra = {
+        # `update` 而不是 `=`：上面已经往 extra 里写了 few-shot 注入证据，
+        # 整体赋值会把它**静默抹掉**。这类"后写的覆盖先写的"在 trace 上尤其难查——
+        # 字段不见了不会报错，只是验收时发现证据不在。
+        t.extra.update({
             "leaf_vs_parent": initial.leaf_vs_parent,
             "candidate_codes": initial.candidate_codes,
             "general_id": initial.general_id,
             "taxonomy_version": taxonomy.load().version,
-        }
+        })
         t.summary = (
             f"{initial.label()}｜leaf={initial.specific_confidence:.2f} "
             f"parent={initial.general_confidence:.2f}｜brand={initial.brand or '-'}"

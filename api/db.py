@@ -77,6 +77,9 @@ CREATE TABLE IF NOT EXISTS eval_samples (
   gold_specific     TEXT,
   source            TEXT,                  -- manual_label | human_feedback
   is_confusing_pair INTEGER DEFAULT 0,
+  -- 回流来源的 audit。**幂等键**：同一次审计重复回流只应留一行。
+  -- 人工导入的金标没有 audit_id，所以是**部分**唯一索引（WHERE 非空）。
+  audit_id          TEXT,
   created_at        TEXT
 );
 
@@ -97,6 +100,9 @@ CREATE TABLE IF NOT EXISTS cache_hit_log (
   score        REAL,
   provenance   TEXT,                       -- auto | human_verified
   match_mode   TEXT,                       -- legacy | strict（留作两态对比）
+  -- chroma | difflib。命中率在两种 backend 下**不可比**（语义分占 0.25，
+  -- 而它是命中的必要条件），所以每行都要能答出自己是在哪个 backend 上产生的。
+  cache_backend TEXT,
   route_1      TEXT,
   route_2      TEXT,
   human_choice TEXT,
@@ -137,7 +143,20 @@ def cursor() -> Iterator[sqlite3.Cursor]:
 
 
 # 建表后补加的列：老库直接 ALTER，不用重建（骨架期数据可丢，但流程要跑通）
+# 建在**新增列**上的索引必须等 ALTER 跑完再建。
+#
+# 踩过的坑：把 `idx_eval_audit` 直接写进 SCHEMA 里，新库没问题（CREATE TABLE
+# 已含该列），**老库直接炸** —— `CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，
+# 列还没加上，索引就先建了：`no such column: audit_id`。
+# 而测试用的永远是新库，所以这个 bug 只会在真实机器上出现。
+POST_MIGRATION_SCHEMA = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_audit
+  ON eval_samples(audit_id) WHERE audit_id IS NOT NULL;
+"""
+
 MIGRATIONS: list[tuple[str, str, str]] = [
+    ("cache_hit_log", "cache_backend", "TEXT"),
+    ("eval_samples", "audit_id", "TEXT"),
     ("product_cache", "provenance", "TEXT NOT NULL DEFAULT 'auto'"),
     ("product_cache", "revision", "INTEGER NOT NULL DEFAULT 1"),
     ("product_cache", "superseded_at", "TEXT"),
@@ -153,6 +172,7 @@ def init_db() -> None:
             cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        conn.executescript(POST_MIGRATION_SCHEMA)
         conn.commit()
     finally:
         conn.close()
@@ -264,14 +284,33 @@ def add_eval_sample(
     gold_specific: str | None,
     source: str,
     is_confusing_pair: bool = False,
+    audit_id: str | None = None,
 ) -> str:
-    sid = new_id()
+    """写一条评测样本。给了 `audit_id` 就按它幂等 —— 同一次审计重复回流只留一行。
+
+    幂等键选 audit_id 而不是 image_path：同一张图可以被审计多次
+    （比如换了模型重跑），那是两条独立的人工裁定，不该互相覆盖。
+    """
     with cursor() as cur:
+        if audit_id:
+            cur.execute("SELECT id FROM eval_samples WHERE audit_id=?", (audit_id,))
+            row = cur.fetchone()
+            if row:
+                cur.execute(
+                    "UPDATE eval_samples SET image_path=?, gold_general=?, gold_specific=?,"
+                    " source=?, is_confusing_pair=? WHERE audit_id=?",
+                    (image_path, gold_general, gold_specific, source,
+                     int(is_confusing_pair), audit_id),
+                )
+                return row["id"]
+        sid = new_id()
         cur.execute(
             "INSERT INTO eval_samples"
-            " (id,image_path,gold_general,gold_specific,source,is_confusing_pair,created_at)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (sid, image_path, gold_general, gold_specific, source, int(is_confusing_pair), now()),
+            " (id,image_path,gold_general,gold_specific,source,is_confusing_pair,"
+            "  audit_id,created_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (sid, image_path, gold_general, gold_specific, source,
+             int(is_confusing_pair), audit_id, now()),
         )
     return sid
 
@@ -285,6 +324,7 @@ def log_cache_hit(
     score: float,
     provenance: str | None,
     match_mode: str,
+    cache_backend: str | None = None,
 ) -> None:
     """命中当下就落一行。路由与人工结果稍后由 `finalize_cache_hit` 补。
 
@@ -294,13 +334,13 @@ def log_cache_hit(
     with cursor() as cur:
         cur.execute(
             "INSERT INTO cache_hit_log"
-            " (audit_id,cache_id,score,provenance,match_mode,created_at,updated_at)"
-            " VALUES (?,?,?,?,?,?,?)"
+            " (audit_id,cache_id,score,provenance,match_mode,cache_backend,created_at,updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?)"
             " ON CONFLICT(audit_id) DO UPDATE SET"
             "  cache_id=excluded.cache_id, score=excluded.score,"
             "  provenance=excluded.provenance, match_mode=excluded.match_mode,"
-            "  updated_at=excluded.updated_at",
-            (audit_id, cache_id, score, provenance, match_mode, now(), now()),
+            "  cache_backend=excluded.cache_backend, updated_at=excluded.updated_at",
+            (audit_id, cache_id, score, provenance, match_mode, cache_backend, now(), now()),
         )
 
 

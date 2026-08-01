@@ -143,6 +143,9 @@ class Settings(BaseSettings):
     # 切换前先看 cache_overturn_rate：没有数据支撑就改行为，等于拿准确率去赌一个直觉。
     cache_match_mode: Literal["legacy", "strict"] = "legacy"
     memory_topk: int = 3                    # few-shot 修正记忆注入条数
+    # few-shot 修正记忆总开关。关掉时 `memory.retrieve` 返回空列表，
+    # 调用点不变 —— 开关对比实验要的是"同一条代码路径，只有注入内容不同"。
+    memory_enabled: bool = True
 
     # ---------- 并发 ----------
     max_concurrent_graphs: int = 4          # 同批次并发跑图上限
