@@ -7,6 +7,7 @@ import type { Audit, Classification } from "@/lib/types";
 import { AgentTrace } from "@/components/AgentTrace";
 import { AuditCard } from "@/components/AuditCard";
 import { ReviewCompare } from "@/components/ReviewCompare";
+import { ImageZoom } from "@/components/ImageZoom";
 
 /** ② 单张审计卡片页 —— demo 核心页。左图右 trace，SSE 实时生长。 */
 export default function AuditPage({ params }: { params: Promise<{ id: string }> }) {
@@ -61,10 +62,10 @@ export default function AuditPage({ params }: { params: Promise<{ id: string }> 
         {/* 左：原图 + 结果卡片 */}
         <div className="space-y-4">
           {audit && (
-            /* eslint-disable-next-line @next/next/no-img-element */
-            <img
+            <ImageZoom
               src={imageUrl(audit.image_path)}
               alt="广告原图"
+              caption={initial?.product_name ?? undefined}
               className="w-full rounded-xl border border-line bg-white object-contain p-2"
               style={{ maxHeight: 320 }}
             />
@@ -89,6 +90,7 @@ export default function AuditPage({ params }: { params: Promise<{ id: string }> 
             initial={initial}
             revised={revised}
             reason={needHuman.reason}
+            imagePath={audit?.image_path}
             onDecided={() => api.audit(id).then((a) => setFinal(a.final))}
           />
         </div>
