@@ -21,7 +21,7 @@ from typing import Any, Iterable
 from config import settings
 from graph.state import Evidence, Nutrient, NutrientValue, SourceType
 from services import taxonomy, vlm
-from services.search import Query, SearchHit, split_script
+from services.search import GENERIC_CATEGORY_WORDS, Query, SearchHit, split_script
 
 logger = logging.getLogger(__name__)
 
@@ -106,15 +106,64 @@ def _token_set(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(t) > 1}
 
 
-def _has_overlap(title: str, brand: str | None, product_name: str | None) -> bool:
-    """标题与 brand+product_name 有无重叠。
+def _discriminative_tokens(brand: str | None, product_name: str | None) -> set[str]:
+    """能证明"是同一个产品"的词 —— **类目词不算**。
+
+    `GENERIC_CATEGORY_WORDS` 里的 yoghurt / drink / milk 这类词，
+    全网每一个同类页面上都有。拿它们当"同一个产品"的判据，
+    竞品页（`Anchor Drinking Yoghurt 180ml`）和科普文
+    （`Greek Yoghurt Nutrition Facts`）会一起进候选池 ——
+    它们的营养面板是**真的**，只是**不是这个产品的**。
+    那比没有证据更糟：无证据会老实转人工，错证据会伪装成有据可依。
+
+    与 `search.is_generic` 用同一份词表、同一条理由（Day5 §3 规则 3）：
+    那边管"不许发泛查询"，这边管"不许收泛结果"。之前只做了前一半 ——
+    实测 `Kotmale Drinking Yoghurt` 的搜索结果里，
+    `Anchor Drinking Yoghurt` 只靠 "drinking"+"yoghurt" 就能过关。
+    """
+    brand_latin, _ = split_script(brand)
+    toks = _token_set(f"{brand_latin or ''} {product_name or ''}")
+    return {t for t in toks if t not in GENERIC_CATEGORY_WORDS}
+
+
+def _has_overlap(
+    title: str, brand: str | None, product_name: str | None, url: str = ""
+) -> bool:
+    """标题（或域名）与目标产品有没有**区分性**重叠。
 
     本土文字标题与英文查询词天然无重叠，这时改用拉丁部分再判一次，
     防止误杀 Daraz 这类本土电商页面（Day5 §5 阶段一）。
     """
-    want = _token_set(f"{brand or ''} {product_name or ''}")
+    brand_latin, brand_native = split_script(brand)
+    brand_toks = _token_set(brand_latin or "")
+
+    # **品牌已知 → 必须命中品牌。** 品名不参与判定。
+    #
+    # 为什么不靠"非类目词"凑：`GENERIC_CATEGORY_WORDS` 里有 "drink" 却没有
+    # "drinking"，于是 `Anchor Drinking Yoghurt` 靠一个 "drinking" 就过了关。
+    # 补词表是补不完的 —— 单复数、-ing、拼写变体（yogurt/yoghurt）没有尽头，
+    # 而漏一个的代价是竞品的营养面板被当成本产品的证据。
+    # 与 HFSS 那次同类：**别用一份必须穷举才成立的表当判据**。
+    # 品牌才是识别产品的那个词，就认它。
+    #
+    # 代价是品牌 OCR 认错时会全部落空 → `no_result` → 转人工。
+    # 那是老实的失败：宁可交给人，也不拿错产品的数字去裁定（纪律 #6）。
+    want = brand_toks or _discriminative_tokens(brand, product_name)
     if not want:
+        # 品牌未识别且品名全是类目词 —— 我们这边没有任何区分性信息，
+        # 判不了就别在这里拦，交给阶段二的 LLM（它至少能读懂页面内容）。
         return True
+
+    # 本土文字品牌直接出现在标题里也算命中（拉丁转写可能对不上）
+    if brand_native and brand_native in (title or ""):
+        return True
+
+    # 品牌自己的域名：标题可能只写 "Drinking Yoghurt"，不该因此误杀
+    host = re.sub(r"[^a-z0-9]", "", (url or "").lower().split("/")[2] if "//" in (url or "") else "")
+    brand_key = re.sub(r"[^a-z0-9]", "", (brand_latin or "").lower())
+    if brand_key and len(brand_key) > 2 and brand_key in host:
+        return True
+
     if _token_set(title) & want:
         return True
     latin_title, native_title = split_script(title)
@@ -142,7 +191,7 @@ def screen_candidates(
         if is_blacklisted(h.url):
             stats["blacklisted"] += 1
             continue
-        if not _has_overlap(h.title, brand, product_name):
+        if not _has_overlap(h.title, brand, product_name, h.url):
             stats["no_overlap"] += 1
             continue
         st = classify_source(h.url, brand, country)

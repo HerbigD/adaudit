@@ -391,6 +391,84 @@ async def dashscope_chat(
     return data["choices"][0]["message"].get("content") or "", data
 
 
+def _native_generation_url() -> str:
+    """把 OpenAI 兼容 base_url 换算成原生协议的 generation 端点。
+
+    国际站与内地站只差域名，所以从配置里取域名而不是再加一个配置项 ——
+    两个 URL 各配一份，迟早会出现"改了一个忘了另一个"。
+    """
+    from urllib.parse import urlparse
+
+    u = urlparse(settings.dashscope_base_url)
+    return f"{u.scheme}://{u.netloc}/api/v1/services/aigc/text-generation/generation"
+
+
+async def dashscope_generate(
+    messages: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    enable_search: bool = False,
+    search_options: dict[str, Any] | None = None,
+    timeout: float = 90.0,
+) -> tuple[str, dict[str, Any]]:
+    """百炼**原生**协议。返回 (文本, 原始响应)。
+
+    ## 为什么非要多一条协议
+
+    官方能力对比表写得很清楚：**OpenAI 兼容协议（Chat Completions 与 Responses）
+    都「不支持返回搜索来源」**，只有原生协议会返回 `output.search_info`。
+
+    而我们的取证链路把 `search_info.search_results` 当作 URL 的**唯一**可信来源
+    （正文里模型自己写的 URL 会编，一律丢弃）。所以走兼容协议时，
+    联网即使真的发生了，我们也永远拿不到来源 —— 表现就是每条查询 0 结果、
+    不报错、还照常计费。实测 5 种参数组合 × 2 个模型全军覆没，就是这个原因。
+
+    这不是"多一种写法"，是取证链路能不能工作的前提。
+
+    请求/响应形状与兼容协议不同：入参裹在 `input`/`parameters` 里，
+    出参在 `output.choices[0].message.content`，记账字段是
+    `usage.input_tokens/output_tokens`（兼容协议是 prompt_tokens/completion_tokens）。
+    """
+    import httpx
+
+    model = model or settings.qwen_model
+    usage.guard(model)                     # 熔断仍是最外层的闸，与兼容协议同一条纪律
+    if not settings.dashscope_api_key:
+        raise VLMError("缺少 DASHSCOPE_API_KEY")
+    usage.note_model(model)
+
+    body: dict[str, Any] = {
+        "model": model,
+        "input": {"messages": messages},
+        "parameters": {"result_format": "message", "temperature": 0.0},
+    }
+    if enable_search:
+        body["parameters"]["enable_search"] = True
+        body["parameters"]["search_options"] = search_options or {
+            "enable_source": True,          # ← 没有它就不返回 search_info
+            "forced_search": True,
+            "search_strategy": settings.search_strategy,
+        }
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(
+            _native_generation_url(),
+            json=body,
+            headers={"Authorization": f"Bearer {settings.dashscope_api_key}"},
+        )
+    if r.status_code >= 400:
+        raise VLMError(f"DashScope(native) {r.status_code}: {r.text[:400]}")
+    data = r.json()
+
+    u = data.get("usage") or {}
+    usage.record(model, u.get("input_tokens", 0), u.get("output_tokens", 0))
+
+    out = data.get("output") or {}
+    choices = out.get("choices") or []
+    text = ((choices[0].get("message") or {}).get("content") if choices else out.get("text")) or ""
+    return text, data
+
+
 class QwenVLM(BaseVLM):
     name = "qwen"
     adapter = "qwen"

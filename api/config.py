@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     search_retries: int = 1                 # 预算内重试次数（仅超时/网络错误）
     search_candidates_topk: int = 3         # 进 LLM 抽取的候选数
     search_hits_per_query: int = 5          # 每条查询取 top-N 进筛选
+    # 联网检索策略。合法值见阿里云文档：turbo（默认，快）/ max（多源，准）/
+    # agent / agent_max（后两者按次额外计费，且对模型有限制）。
+    # 曾经硬编码成 "standard" —— 那不是合法值，被静默忽略，联网压根没生效。
+    search_strategy: str = "turbo"
     max_evidence: int = 5                   # 一次取证最多产出几条 Evidence
     degraded_threshold_bump: float = 0.05   # degraded 时 route_2 阈值上调
     conflict_relative_gap: float = 0.50     # 冲突判定：相对偏差阈值

@@ -268,11 +268,15 @@ def _hits_from_search_info(raw: dict[str, Any]) -> list[SearchHit]:
     这是**唯一可信的 URL 来源** —— 正文里模型自己写的 URL 可能是编的，
     而 search_info 里的条目是检索器实际访问过的页面。
     """
-    info = (raw.get("search_info") or {}) if isinstance(raw, dict) else {}
-    if not info:
-        choices = raw.get("choices") or []
-        if choices:
-            info = (choices[0].get("message") or {}).get("search_info") or {}
+    if not isinstance(raw, dict):
+        return []
+    # 三个可能的位置，按协议排：原生 `output.search_info` 是**唯一真正会有值**的那个；
+    # 另外两个是兼容协议的形状，留着是为了万一哪天官方补上，不用改这里。
+    info = (
+        ((raw.get("output") or {}).get("search_info") or {})
+        or (raw.get("search_info") or {})
+        or (((raw.get("choices") or [{}])[0].get("message") or {}).get("search_info") or {})
+    )
     out: list[SearchHit] = []
     for item in (info.get("search_results") or []):
         url = item.get("url") or item.get("link") or ""
@@ -296,13 +300,14 @@ async def _dashscope_search(query: str) -> list[SearchHit]:
     """
     from services import vlm  # 延迟导入，避免 search ↔ vlm 循环
 
-    text, raw = await vlm.dashscope_chat(
+    # **必须走原生协议**：OpenAI 兼容协议不返回搜索来源（官方能力对比表），
+    # 而 URL 的唯一可信来源就是 search_info。详见 `vlm.dashscope_generate` 的 docstring。
+    text, raw = await vlm.dashscope_generate(
         [
             {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
             {"role": "user", "content": f"Search query: {query}"},
         ],
         model=settings.llm_model or settings.qwen_model,
-        want_json=True,
         enable_search=True,
         timeout=settings.search_timeout_s * 3,
     )
