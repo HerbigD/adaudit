@@ -15,7 +15,7 @@ import json
 from config import settings
 from graph import edges, events
 from graph.state import AuditState, Classification, Evidence
-from services import cache_store, nutrition, taxonomy, usage, vlm
+from services import cache_store, taxonomy, usage, vlm
 
 
 def _evidence_block(evidence: list[Evidence]) -> str:
@@ -134,16 +134,13 @@ async def adjudicate_with_evidence(state: AuditState) -> dict:
         return {"revised": revised, "route_2": route, "trace": [t]}
 
 
-def _pick_nutrient(evidence: list[Evidence], nutrient: str) -> float | None:
-    """按 source_type 优先级取高可信来源的 normalized 值（Day5 §6 设计理由末句）。"""
-    ranked = sorted(
-        evidence, key=lambda e: nutrition.SOURCE_RANK.get(e.source_type, 9)
-    )
-    for e in ranked:
-        v = e.get(nutrient)
-        if v is not None:
-            return v
-    return None
+_CHEESE_HINT = ("cheese", "奶酪", "芝士", "干酪", "paneer", "haloumi", "halloumi", "feta")
+
+
+def _looks_like_cheese(initial: Classification) -> bool:
+    """5/19 的切分点奶酪是 15g、其余是 3g —— 只能从品名判断是不是奶酪。"""
+    blob = f"{initial.product_name or ''} {initial.brand or ''}".lower()
+    return any(k in blob for k in _CHEESE_HINT)
 
 
 def _rule_based(
@@ -154,51 +151,50 @@ def _rule_based(
 ) -> Classification:
     """无 LLM 时的确定性兜底裁决 —— adapter 打 `rule-fallback`，eval runner 会据此拒绝跑批。
 
-    只处理 taxonomy.json 里 confusing_pairs 声明的维度，且**阈值是占位值**，
-    接真实营养分级模型前不可用于出指标。
+    ## Day6 B1+B2+B3：阈值换成 Annex 4 官方切分点
+
+    此前这里是我按常见 nutrient profiling 惯例**猜的占位值**（糖 15 / 脂 3 /
+    脂 10·盐 1.2 / 糖 2.5），并且拿 `sodium × 2.5` 换成盐再比。两处都已删除：
+
+    - 数值统一由 `services/nutrient_rules.decide()` 执行，来源是 `taxonomy.json`
+      的 `thresholds`（Annex 4 逐字摘录）。本文件不再写任何阈值。
+    - **一律在钠空间比较**，不再换算成盐（Annex 4 全部用 sodium）。营养标签只给盐
+      时的 `salt_g × 400 → sodium_mg` 换算在 `nutrient_rules` 里，方向是"盐→钠"。
+    - 8/23 与 9 按 **per serve** 判；份量不明就返回 `uncertain`，**不拿 per-100g 顶替**，
+      由本函数把它导向人工（`specific_code` 置空 + parent 输出 + 低置信）。
+
+    仍然打 `rule-fallback` adapter：换了权威阈值不等于换成了真实模型裁决，
+    eval 的双闸照旧拦它。
     """
-    sugar = _pick_nutrient(evidence, "sugar")
-    fibre = _pick_nutrient(evidence, "fiber")
-    fat = _pick_nutrient(evidence, "fat")
-    sodium = _pick_nutrient(evidence, "sodium")
-    # 阈值沿用盐口径（g/100g）：钠 × 2.5 ≈ 盐
-    salt = sodium * 2.5 if sodium is not None else None
+    from services import nutrient_rules
 
     # parent 级输入：从候选里挑；leaf 级输入：以自身为起点
     pool = initial.candidate_codes or (
         [initial.specific_code] if initial.specific_code is not None else []
     )
-    code = pool[0] if pool else initial.specific_code
-    bits: list[str] = []
+    blob = f"{initial.product_name or ''} {initial.brand or ''}"
+    verdict = nutrient_rules.decide(
+        pool,
+        evidence,
+        is_cheese=_looks_like_cheese(initial),
+        # Annex 4 的 7/24（10g 脂肪）只管 savoury sauces，8/24（2g 脂肪）只管汤。
+        # 形态判不出时传 None，`decide` 会转人工而不是硬套阈值 —— 否则
+        # 橄榄油（~100g 脂肪/100g）会被判进 24。
+        is_sauce=nutrient_rules.sauce_form(blob),
+        is_soup=nutrient_rules.soup_form(blob),
+    )
 
-    def pick(a: int, b: int, hi_cond: bool, note: str) -> int:
-        bits.append(note)
-        return b if hi_cond else a
+    if verdict.ok:
+        code = verdict.code
+        conf = 0.55 if conflict else 0.88
+        detail = verdict.reason
+    else:
+        # 证据不够按 Annex 4 判 —— 保持父类、压低置信，让条件边②把它导向人工。
+        # 这里**不许**回落到 pool[0]：随手挑一个候选会把"判不了"伪装成"判出来了"。
+        code = None
+        conf = 0.40
+        detail = verdict.reason
 
-    pool_set = set(pool)
-    if {2, 12} & pool_set and sugar is not None:
-        code = pick(2, 12, sugar >= 15 or (fibre is not None and fibre < 3),
-                    f"糖 {sugar}g/100g" + (f"、纤维 {fibre}g" if fibre is not None else ""))
-    elif {5, 19} & pool_set and fat is not None:
-        code = pick(5, 19, fat >= 3.0, f"脂肪 {fat}g/100g")
-    elif {8, 23} & pool_set and (fat is not None or salt is not None):
-        code = pick(8, 23, (fat or 0) >= 10 or (salt or 0) >= 1.2,
-                    "、".join(x for x in [f"脂肪 {fat}g" if fat is not None else "",
-                                         f"盐 {salt}g" if salt is not None else ""] if x))
-    elif {16, 17} & pool_set and (sugar is not None or salt is not None):
-        code = pick(17, 16, (sugar or 0) >= 15,
-                    "、".join(x for x in [f"糖 {sugar}g" if sugar is not None else "",
-                                         f"盐 {salt}g" if salt is not None else ""] if x))
-    # taxonomy v1.0-codebook 后混淆对从 (11,18)/(11,25) 变成 (18,25)/(25,29)。
-    # **阈值一个没动**（仍是 2.5 g/100ml），只是把分支挂到现行的对上 ——
-    # 旧分支在新语义下会得出"糖高 → 瓶装水"这种反向结论，留着比删掉更危险。
-    elif {18, 25} & pool_set and sugar is not None:
-        code = pick(18, 25, sugar >= 2.5, f"糖 {sugar}g/100ml")
-    elif {25, 29} & pool_set and sugar is not None:
-        code = pick(29, 25, sugar >= 2.5, f"糖 {sugar}g/100ml")
-
-    changed = code != initial.specific_code
-    conf = 0.55 if conflict else (0.88 if bits else 0.62)
     if degraded:
         conf = min(conf, 0.60)          # 降级证据不配拿高置信
     gid = taxonomy.general_id_of(code) if code else initial.general_id
@@ -216,9 +212,9 @@ def _rule_based(
         general_confidence=max(initial.general_confidence, conf),
         reasoning=(
             ("【基于非结构化证据】" if degraded else "")
-            + "依据检索到的营养证据"
-            + ("重判" if changed else "确认初判")
-            + f"：{'、'.join(bits) if bits else '证据未覆盖判定阈值'}"
+            + ("【Annex 4 规则判定】" if verdict.ok else "【Annex 4 判据不足，转人工】")
+            + detail
+            + (f"（读数 {verdict.used}）" if verdict.used else "")
         ),
         source="adjudicator",
         model="rule-fallback",

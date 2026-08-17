@@ -63,4 +63,9 @@ def step(node: str, summary: str = "") -> Iterator[StepTrace]:
             status=t.status,
             summary=t.summary,
             fallback_reason=t.fallback_reason,
+            # `extra` 一并推给前端：时间线要区分"缓存命中跳过搜索"与"正在搜索"，
+            # 靠的是 extra.cache_id / extra.strict_rejected 这类**结构化标记**，
+            # 不是去 summary 字符串里找"缓存命中"四个字。
+            # 教训见 services/taxonomy.py 的 HFSS_VERDICTS —— 从文案推语义那次。
+            extra=t.extra or {},
         )

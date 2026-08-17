@@ -25,8 +25,17 @@ def remember(
     corrected: Classification,
     *,
     rejected: Classification | None = None,
+    audit_id: str | None = None,
 ) -> str:
-    """一次写两处：eval 集（标注扩充）+ 记忆库（向量化）。"""
+    """一次写两处：eval 集（标注扩充）+ 记忆库（向量化）。
+
+    给了 `audit_id` 就**两处都按它幂等**：eval 行按 audit_id upsert，
+    向量 id 直接用 audit_id。不给则退回一次性 uuid（旧行为，供图外调用）。
+
+    为什么必须幂等：`resume` 会重新驱动整张图，人工也可能改主意再裁一次。
+    不去重的话，同一条修正会在 eval 集里堆成好几行 —— 而 eval 集是要拿去算
+    准确率的，重复样本等于给某几张图加权。
+    """
     is_pair = taxonomy.is_confusing_pair(
         corrected.specific_code, rejected.specific_code if rejected else None
     )
@@ -36,11 +45,13 @@ def remember(
         gold_specific=str(corrected.specific_code) if corrected.specific_code else None,
         source="human_feedback",
         is_confusing_pair=is_pair,
+        audit_id=audit_id,
     )
+    vector_id = audit_id or sample_id
     doc = _doc(corrected.brand, corrected.product_name, corrected.reasoning)
     try:
         vectorstore.collection(COLLECTION).upsert(
-            ids=[sample_id],
+            ids=[vector_id],
             documents=[doc or image_path],
             metadatas=[
                 {
@@ -59,7 +70,14 @@ def remember(
 
 
 def retrieve(query: str, k: int | None = None) -> list[str]:
-    """返回可直接拼进 system prompt 的 few-shot 文本块。"""
+    """返回可直接拼进 system prompt 的 few-shot 文本块。
+
+    `MEMORY_ENABLED=false` 时**返回空**而不是绕过调用点 ——
+    开关对比实验要的是"同一条代码路径，只有注入内容不同"，
+    在调用点上加 if 会让两臂走不同的代码，比出来的差异不干净。
+    """
+    if not settings.memory_enabled:
+        return []
     k = k or settings.memory_topk
     try:
         res = vectorstore.collection(COLLECTION).query(query_texts=[query or " "], n_results=k)

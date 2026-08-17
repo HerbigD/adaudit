@@ -77,8 +77,42 @@ CREATE TABLE IF NOT EXISTS eval_samples (
   gold_specific     TEXT,
   source            TEXT,                  -- manual_label | human_feedback
   is_confusing_pair INTEGER DEFAULT 0,
+  -- 回流来源的 audit。**幂等键**：同一次审计重复回流只应留一行。
+  -- 人工导入的金标没有 audit_id，所以是**部分**唯一索引（WHERE 非空）。
+  audit_id          TEXT,
   created_at        TEXT
 );
+
+-- 缓存命中观测台（Day7 · OPEN-RISK-01 的观察指标）
+--
+-- 为什么单独一张表，而不是每次从 trace_json 里刨：
+-- ① 改判率要跨批次看趋势，逐条解析 JSON 既慢、又会随 trace 结构变动静默失效；
+-- ② 这张表是"缓存到底可不可信"的**证据**，它得能被直接 SELECT 出来给人看；
+-- ③ 一次审计最多一次缓存命中，audit_id 作主键天然幂等 —— resume 会重跑 _persist，
+--    靠主键 upsert 保证重复调用不会把一次命中记成两次。
+--
+-- overturned 三态：1=人工改判 / 0=人工确认 / NULL=还没走到人工。
+-- **NULL 不等于 0**：把"没人看过"算成"人工确认了"会让改判率虚低，
+-- 而这个指标存在的意义恰恰是发现缓存在悄悄喂错答案。
+CREATE TABLE IF NOT EXISTS cache_hit_log (
+  audit_id     TEXT PRIMARY KEY,
+  cache_id     TEXT,
+  score        REAL,
+  provenance   TEXT,                       -- auto | human_verified
+  match_mode   TEXT,                       -- legacy | strict（留作两态对比）
+  -- chroma | difflib。命中率在两种 backend 下**不可比**（语义分占 0.25，
+  -- 而它是命中的必要条件），所以每行都要能答出自己是在哪个 backend 上产生的。
+  cache_backend TEXT,
+  route_1      TEXT,
+  route_2      TEXT,
+  human_choice TEXT,
+  cached_code  INTEGER,                    -- 基于缓存证据得出的叶子（revised）
+  final_code   INTEGER,
+  overturned   INTEGER,                    -- 1 / 0 / NULL，见上
+  created_at   TEXT,
+  updated_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cache_hit_cache ON cache_hit_log(cache_id);
 """
 
 
@@ -109,7 +143,20 @@ def cursor() -> Iterator[sqlite3.Cursor]:
 
 
 # 建表后补加的列：老库直接 ALTER，不用重建（骨架期数据可丢，但流程要跑通）
+# 建在**新增列**上的索引必须等 ALTER 跑完再建。
+#
+# 踩过的坑：把 `idx_eval_audit` 直接写进 SCHEMA 里，新库没问题（CREATE TABLE
+# 已含该列），**老库直接炸** —— `CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，
+# 列还没加上，索引就先建了：`no such column: audit_id`。
+# 而测试用的永远是新库，所以这个 bug 只会在真实机器上出现。
+POST_MIGRATION_SCHEMA = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_audit
+  ON eval_samples(audit_id) WHERE audit_id IS NOT NULL;
+"""
+
 MIGRATIONS: list[tuple[str, str, str]] = [
+    ("cache_hit_log", "cache_backend", "TEXT"),
+    ("eval_samples", "audit_id", "TEXT"),
     ("product_cache", "provenance", "TEXT NOT NULL DEFAULT 'auto'"),
     ("product_cache", "revision", "INTEGER NOT NULL DEFAULT 1"),
     ("product_cache", "superseded_at", "TEXT"),
@@ -125,6 +172,7 @@ def init_db() -> None:
             cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        conn.executescript(POST_MIGRATION_SCHEMA)
         conn.commit()
     finally:
         conn.close()
@@ -236,13 +284,100 @@ def add_eval_sample(
     gold_specific: str | None,
     source: str,
     is_confusing_pair: bool = False,
+    audit_id: str | None = None,
 ) -> str:
-    sid = new_id()
+    """写一条评测样本。给了 `audit_id` 就按它幂等 —— 同一次审计重复回流只留一行。
+
+    幂等键选 audit_id 而不是 image_path：同一张图可以被审计多次
+    （比如换了模型重跑），那是两条独立的人工裁定，不该互相覆盖。
+    """
     with cursor() as cur:
+        if audit_id:
+            cur.execute("SELECT id FROM eval_samples WHERE audit_id=?", (audit_id,))
+            row = cur.fetchone()
+            if row:
+                cur.execute(
+                    "UPDATE eval_samples SET image_path=?, gold_general=?, gold_specific=?,"
+                    " source=?, is_confusing_pair=? WHERE audit_id=?",
+                    (image_path, gold_general, gold_specific, source,
+                     int(is_confusing_pair), audit_id),
+                )
+                return row["id"]
+        sid = new_id()
         cur.execute(
             "INSERT INTO eval_samples"
-            " (id,image_path,gold_general,gold_specific,source,is_confusing_pair,created_at)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (sid, image_path, gold_general, gold_specific, source, int(is_confusing_pair), now()),
+            " (id,image_path,gold_general,gold_specific,source,is_confusing_pair,"
+            "  audit_id,created_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (sid, image_path, gold_general, gold_specific, source,
+             int(is_confusing_pair), audit_id, now()),
         )
     return sid
+
+
+# --------------------------------------------------------------------------- #
+# cache_hit_log（Day7 · OPEN-RISK-01 观察指标）
+# --------------------------------------------------------------------------- #
+def log_cache_hit(
+    audit_id: str,
+    cache_id: str | None,
+    score: float,
+    provenance: str | None,
+    match_mode: str,
+    cache_backend: str | None = None,
+) -> None:
+    """命中当下就落一行。路由与人工结果稍后由 `finalize_cache_hit` 补。
+
+    用 upsert 而不是 insert：resume 会让整条链路重跑一遍，
+    insert 会撞主键或把一次命中记成两次。
+    """
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO cache_hit_log"
+            " (audit_id,cache_id,score,provenance,match_mode,cache_backend,created_at,updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(audit_id) DO UPDATE SET"
+            "  cache_id=excluded.cache_id, score=excluded.score,"
+            "  provenance=excluded.provenance, match_mode=excluded.match_mode,"
+            "  cache_backend=excluded.cache_backend, updated_at=excluded.updated_at",
+            (audit_id, cache_id, score, provenance, match_mode, cache_backend, now(), now()),
+        )
+
+
+def finalize_cache_hit(
+    audit_id: str,
+    *,
+    route_1: str | None,
+    route_2: str | None,
+    human_choice: str | None,
+    cached_code: int | None,
+    final_code: int | None,
+) -> None:
+    """补齐命中之后发生了什么。没有对应命中行就什么都不做（未命中的审计不该出现在表里）。
+
+    `overturned` 只在人工真的裁定过之后才有值：
+    人工裁定了且 final 与缓存给出的叶子不一致 → 1；一致 → 0；没走到人工 → 保持 NULL。
+    """
+    overturned = None
+    if human_choice:
+        overturned = int(final_code != cached_code)
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE cache_hit_log SET route_1=?, route_2=?, human_choice=?,"
+            " cached_code=?, final_code=?, overturned=?, updated_at=? WHERE audit_id=?",
+            (route_1, route_2, human_choice, cached_code, final_code,
+             overturned, now(), audit_id),
+        )
+
+
+def cache_hit_rows(audit_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM cache_hit_log"
+    args: list = []
+    if audit_ids is not None:
+        if not audit_ids:
+            return []
+        sql += f" WHERE audit_id IN ({','.join('?' * len(audit_ids))})"
+        args = list(audit_ids)
+    with cursor() as cur:
+        cur.execute(sql, args)
+        return [dict(r) for r in cur.fetchall()]

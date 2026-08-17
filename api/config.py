@@ -58,9 +58,12 @@ class Settings(BaseSettings):
     daily_token_budget: int = 500_000
     usage_path: str = str(DATA_DIR / "usage.json")
     # 成本估算配置化。币种跟随百炼账单：中国站 = CNY、国际站 = USD，只改配置不改代码。
-    llm_price_in_per_mtok: float = 2.0
-    llm_price_out_per_mtok: float = 8.0
-    cost_currency: str = "CNY"
+    # 百炼是阶梯价（按上下文长度分档），这里只填一个数 —— 填实际会落到的那一档。
+    # 默认值 = qwen3.7-plus 国际站最短档（$0.32/$1.28 per Mtok，2026-07）；
+    # 本项目 prompt 约 1.5k–4k token，落最短档，所以估算值是**下限**。
+    llm_price_in_per_mtok: float = 0.32
+    llm_price_out_per_mtok: float = 1.28
+    cost_currency: str = "USD"
 
     # ---------- 搜索后端 ----------
     # dashscope = 百炼内置联网（复用同一把 key）；mock = 离线假数据
@@ -87,6 +90,10 @@ class Settings(BaseSettings):
     search_retries: int = 1                 # 预算内重试次数（仅超时/网络错误）
     search_candidates_topk: int = 3         # 进 LLM 抽取的候选数
     search_hits_per_query: int = 5          # 每条查询取 top-N 进筛选
+    # 联网检索策略。合法值见阿里云文档：turbo（默认，快）/ max（多源，准）/
+    # agent / agent_max（后两者按次额外计费，且对模型有限制）。
+    # 曾经硬编码成 "standard" —— 那不是合法值，被静默忽略，联网压根没生效。
+    search_strategy: str = "turbo"
     max_evidence: int = 5                   # 一次取证最多产出几条 Evidence
     degraded_threshold_bump: float = 0.05   # degraded 时 route_2 阈值上调
     conflict_relative_gap: float = 0.50     # 冲突判定：相对偏差阈值
@@ -105,6 +112,22 @@ class Settings(BaseSettings):
     taxonomy_path: str = str(Path(__file__).resolve().parent / "data" / "taxonomy.json")
     taxonomy_prompt_token_budget: int = 2000
 
+    # ---------- A3 消融：prompt 里放哪些混淆对 ----------
+    # A  = 不放任何对（回答"置信度信号是不是模型内生的"）
+    # B  = 仅 Tier 1 definitional（共享数值切分线，从 Annex 4 阈值自动推出）
+    # B2 = Tier 1 + Tier 2 definitional_compositional —— **线上默认**
+    # C  = 再加 Tier 3 dev 经验对（只准在 held-out 上报，且报告里必须声明）
+    pairs_arm: Literal["A", "B", "B2", "C"] = "B2"
+
+    # ---------- A2 数据切分（Day6 决议） ----------
+    # 单标签金标池 → dev 200 / eval 300，按 country（有 language 时再叠 language）分层。
+    # **种子写进配置**：切分必须可复现，否则"我们没看过测试集"这句话无从验证。
+    split_seed: int = 20260731
+    split_dev_size: int = 200
+    split_eval_size: int = 300
+    split_smoke_size: int = 12          # 冒烟集，与 dev/eval 互斥
+    split_dir: str = str(Path(__file__).resolve().parent / "data" / "splits")
+
     # ---------- 存储 ----------
     db_path: str = str(DATA_DIR / "adaudit.db")
     # checkpointer 单独一个库文件：LangGraph 跑图时会长时间持有写事务，
@@ -116,7 +139,17 @@ class Settings(BaseSettings):
 
     # ---------- 检索 ----------
     cache_hit_threshold: float = 0.82       # 混合检索相似度阈值，≥ 视为命中
+
+    # 缓存匹配模式（Day7 §3-16 决议，**手术预备，默认不启用**）
+    #   legacy —— 原始行为：只看混合得分。保持它是为了继续观察真实误命中分布
+    #   strict —— 加两道否决：① 非对称覆盖（档案名 token 必须被查询名全覆盖）
+    #                        ② 维度词差集否决（差集含 double/toned/full cream… → 判不命中）
+    # 切换前先看 cache_overturn_rate：没有数据支撑就改行为，等于拿准确率去赌一个直觉。
+    cache_match_mode: Literal["legacy", "strict"] = "legacy"
     memory_topk: int = 3                    # few-shot 修正记忆注入条数
+    # few-shot 修正记忆总开关。关掉时 `memory.retrieve` 返回空列表，
+    # 调用点不变 —— 开关对比实验要的是"同一条代码路径，只有注入内容不同"。
+    memory_enabled: bool = True
 
     # ---------- 并发 ----------
     max_concurrent_graphs: int = 4          # 同批次并发跑图上限

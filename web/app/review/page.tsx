@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, imageUrl } from "@/lib/api";
 import type { Audit } from "@/lib/types";
 import { ReviewCompare } from "@/components/ReviewCompare";
+import { ImageZoom } from "@/components/ImageZoom";
 
 /** ③ 人工复核队列页。队列来源：audits.status='pending_human'（interrupt 挂起的图实例）。 */
 export default function ReviewPage() {
@@ -33,9 +34,7 @@ export default function ReviewPage() {
       <div className="flex items-baseline justify-between">
         <div>
           <h1 className="text-lg font-semibold">人工复核队列</h1>
-          <p className="text-sm text-muted">
-            Agent 给出 original 与 prediction 两个选项，人工裁定后回流 eval 集 + 记忆库 + 缓存库。
-          </p>
+
         </div>
         <button className="btn-ghost" onClick={refresh}>
           刷新
@@ -50,28 +49,32 @@ export default function ReviewPage() {
       <ul className="space-y-2">
         {queue.map((a) => (
           <li key={a.id} className="space-y-3">
-            <button
-              className="card flex w-full items-center gap-3 text-left hover:bg-slate-50"
-              onClick={() => setOpenId(openId === a.id ? null : a.id)}
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
+            {/* 缩略图独立于展开按钮之外：点图看大图，点其余区域展开复核 */}
+            <div className="card flex w-full items-center gap-3 hover:bg-slate-50">
+              <ImageZoom
                 src={imageUrl(a.image_path)}
-                alt=""
-                className="h-12 w-12 rounded border border-line object-cover"
+                alt={a.initial?.product_name ?? "广告原图"}
+                caption={a.initial?.product_name ?? undefined}
+                className="h-12 w-12 shrink-0 rounded border border-line object-cover"
               />
-              <div className="flex-1">
-                <div className="text-sm font-medium">
-                  {a.initial?.product_name ?? "未识别产品"}
-                  {a.initial?.brand && <span className="ml-2 text-xs text-muted">{a.initial.brand}</span>}
+              <button
+                type="button"
+                className="flex flex-1 items-center gap-3 text-left"
+                onClick={() => setOpenId(openId === a.id ? null : a.id)}
+              >
+                <div className="flex-1">
+                  <div className="text-sm font-medium">
+                    {a.initial?.product_name ?? "未识别产品"}
+                    {a.initial?.brand && <span className="ml-2 text-xs text-muted">{a.initial.brand}</span>}
+                  </div>
+                  <div className="text-xs text-muted">
+                    卡点：{a.reason} · 路由 {a.route_1}
+                    {a.route_2 ? ` → ${a.route_2}` : ""}
+                  </div>
                 </div>
-                <div className="text-xs text-muted">
-                  卡点：{a.reason} · 路由 {a.route_1}
-                  {a.route_2 ? ` → ${a.route_2}` : ""}
-                </div>
-              </div>
-              <span className="text-xs text-brand">{openId === a.id ? "收起" : "复核"}</span>
-            </button>
+                <span className="text-xs text-brand">{openId === a.id ? "收起" : "复核"}</span>
+              </button>
+            </div>
 
             {openId === a.id && detail && (
               <ReviewCompare
@@ -80,6 +83,7 @@ export default function ReviewPage() {
                 revised={detail.revised}
                 evidence={detail.evidence}
                 reason={detail.reason}
+                imagePath={detail.image_path ?? a.image_path}
                 onDecided={() => {
                   setOpenId(null);
                   refresh();

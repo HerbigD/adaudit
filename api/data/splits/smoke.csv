@@ -1,0 +1,13 @@
+id,image_path,gold_specific,country,language,split
+1634031063987,SL cleaned Images/1634031063987.jpg,20,LK,local_only,smoke
+1599198030848,Sri Lanka/1599198030848.jpg,14,LK,mixed,smoke
+1604032891237,India/1604032891237.jpg,5,IN,en_only,smoke
+1581131312574,Bangladesh/1581131312574.jpg,18,BD,na,smoke
+1626847294951,SL cleaned Images/1626847294951.jpg,20,LK,en_only,smoke
+1594789747210,Sri Lanka/1594789747210.jpg,5,LK,mixed,smoke
+1639381829745,SL cleaned Images/1639381829745.jpg,20,LK,en_only,smoke
+1627883609520,Pakistan/1627883609520.jpg,34,PK,na,smoke
+1684825542505,Bangladesh/1684825542505.jpg,1,BD,en_only,smoke
+1593672267889,Sri Lanka/1593672267889.jpg,29,LK,local_only,smoke
+1604119887207,India/1604119887207.jpg,14,IN,en_only,smoke
+1607834217517,Bangladesh/1607834217517.jpg,20,BD,en_only,smoke

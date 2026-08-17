@@ -1,0 +1,120 @@
+{
+  "cache_backend": "difflib",
+  "degrade_reason": "CHROMA_DISABLE=1（对比实验显式指定）",
+  "n_archives": 12,
+  "n_queries": 12,
+  "hit_rate": 1.0,
+  "recall_on_same_product": 1.0,
+  "false_hit_rate_on_decoys": 1.0,
+  "mean_score": 0.9683,
+  "rows": [
+    {
+      "kind": "exact",
+      "brand": "Amul",
+      "query": "Amul Toned Milk 1L",
+      "score": 1.0,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "exact",
+      "brand": "Nestle",
+      "query": "Nestle Everyday Dairy Whitener 400g",
+      "score": 1.0,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "exact",
+      "brand": "Kelloggs",
+      "query": "Kelloggs Corn Flakes 475g",
+      "score": 1.0,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "exact",
+      "brand": "Britannia",
+      "query": "Britannia Marie Gold Biscuits 250g",
+      "score": 1.0,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "exact",
+      "brand": "Maggi",
+      "query": "Maggi Masala Instant Noodles 70g",
+      "score": 1.0,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "exact",
+      "brand": "Parle",
+      "query": "Parle G Glucose Biscuits 800g",
+      "score": 1.0,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "variant",
+      "brand": "Coca Cola",
+      "query": "Coca Cola Original 750ml Pack",
+      "score": 0.9438,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "variant",
+      "brand": "Lays",
+      "query": "Lays Classic Salted Chips 52g Pack",
+      "score": 0.9504,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "variant",
+      "brand": "Dabur",
+      "query": "Dabur Real Mixed Fruit Juice 1L Pack",
+      "score": 0.9564,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "variant",
+      "brand": "Amul",
+      "query": "Amul Butter 500g Pack",
+      "score": 0.9255,
+      "hit": true,
+      "should_hit": true,
+      "correct": true
+    },
+    {
+      "kind": "decoy",
+      "brand": "Amul",
+      "query": "Amul Double Toned Milk 1L",
+      "score": 0.9293,
+      "hit": true,
+      "should_hit": false,
+      "correct": false
+    },
+    {
+      "kind": "decoy",
+      "brand": "Maggi",
+      "query": "Maggi Atta Instant Noodles 70g",
+      "score": 0.9141,
+      "hit": true,
+      "should_hit": false,
+      "correct": false
+    }
+  ]
+}

@@ -67,6 +67,9 @@ async def health() -> dict[str, Any]:
             "confirmed_ratio": taxonomy.cascade()["confirmed_ratio"],
             **taxonomy.token_report(),
         },
+        # 匹配模式进 health：strict 是"手术预备"开关，线上到底跑的哪一态
+        # 必须能一眼查到 —— 否则改判率数字出来了也说不清是在哪种匹配下测的
+        "cache_match_mode": settings.cache_match_mode,
         "cache": cache_store.stats(),
         "memory": memory.stats(),
     }

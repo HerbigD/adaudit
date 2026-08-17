@@ -143,3 +143,32 @@ def test_cost_estimate_follows_config_currency(monkeypatch):
     cost = usage.record("qwen3.7-plus", 1_000_000, 1_000_000)
     assert cost == pytest.approx(1.6)
     assert usage.snapshot()["currency"] == "USD"
+
+
+# --------------------------------------------------------------------------- #
+# 嵌套归集（Day6 真跑时发现：内层 collect 曾把外层顶掉，外层永远收 0）
+# --------------------------------------------------------------------------- #
+def test_nested_collect_bubbles_up_to_every_active_collector():
+    with usage.collect() as outer:
+        with usage.collect() as inner:
+            usage.record("qwen3.7-plus", 100, 50)
+        usage.record("qwen3.7-plus", 10, 5)
+
+    assert (inner.tokens_in, inner.tokens_out, inner.calls) == (100, 50, 1)
+    assert (outer.tokens_in, outer.tokens_out, outer.calls) == (110, 55, 2)
+    assert outer.cost == pytest.approx(usage.estimate_cost(110, 55))
+
+
+async def test_collect_survives_asyncio_tasks():
+    """LangGraph 把节点放进独立 task 跑 —— 外层收集器必须照样收得到。"""
+    import asyncio
+
+    async def node():
+        with usage.collect():                 # 节点自己也收一份
+            usage.record("qwen3.7-plus", 200, 100)
+
+    with usage.collect() as outer:
+        await asyncio.gather(asyncio.create_task(node()), asyncio.create_task(node()))
+
+    assert outer.calls == 2
+    assert outer.tokens_in == 400 and outer.tokens_out == 200

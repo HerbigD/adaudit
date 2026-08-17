@@ -52,6 +52,12 @@ def aggregate(batch_id: str) -> dict[str, Any]:
         )
         conf_hist[key] += 1
 
+    # Day7 · OPEN-RISK-01 观察指标：缓存命中率 与 命中后被人工改判率
+    hit_rows = db.cache_hit_rows([r["id"] for r in rows])
+    hits = len(hit_rows)
+    reviewed = [h for h in hit_rows if h["overturned"] is not None]
+    overturned = [h for h in reviewed if h["overturned"] == 1]
+
     # HFSS 归属来自 taxonomy.HFSS_VERDICTS 判定表（逐条可审），不是名称正则猜的
     risky = taxonomy.hfss_codes()
     hfss = sum(v for k, v in specific_dist.items() if int(k) in risky)
@@ -76,6 +82,34 @@ def aggregate(batch_id: str) -> dict[str, Any]:
         "adapters": dict(adapters),
         "taxonomy_version": taxonomy.load().version,
         "cache": cache_store.stats(),
+
+        # ---- Day7 新增两数（日报 §0 已申报） ----
+        # 分母是**整批**，不是"走了搜索路径的"：命中率要回答"这批广告有多少免了搜索"。
+        "cache_hit_rate": round(hits / n, 4) if n else 0.0,
+        # 分母按决议是"缓存命中总数"。⚠️ 它会被"命中但没走到人工"的样本稀释 ——
+        # 人工复核率越低，这个数越接近 0，与缓存质量无关。
+        # 所以同时给出只在**经人工裁定过的命中**里算的那一版，两个一起看才有意义。
+        "cache_overturn_rate": round(len(overturned) / hits, 4) if hits else 0.0,
+        "cache_overturn_detail": {
+            "hits": hits,
+            "reviewed": len(reviewed),
+            "overturned": len(overturned),
+            "overturn_rate_among_reviewed": (
+                round(len(overturned) / len(reviewed), 4) if reviewed else None
+            ),
+            "unreviewed": hits - len(reviewed),
+            "note": (
+                "overturned=NULL（未走到人工）不计入分子，但按决议计入 cache_overturn_rate 的分母。"
+                "判断缓存质量请看 overturn_rate_among_reviewed；"
+                "reviewed 太小时该值不可解读。"
+            ),
+            "by_match_mode": dict(Counter(h["match_mode"] or "unknown" for h in hit_rows)),
+            # 同一批里混了两种 backend 说明中途降级过，那批数字要分开看
+            "by_cache_backend": dict(
+                Counter(h["cache_backend"] or "unknown" for h in hit_rows)
+            ),
+            "by_provenance": dict(Counter(h["provenance"] or "unknown" for h in hit_rows)),
+        },
     }
 
 

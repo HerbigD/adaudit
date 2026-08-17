@@ -21,11 +21,15 @@ from typing import Any, Iterable
 from config import settings
 from graph.state import Evidence, Nutrient, NutrientValue, SourceType
 from services import taxonomy, vlm
-from services.search import Query, SearchHit, split_script
+from services.search import GENERIC_CATEGORY_WORDS, Query, SearchHit, split_script
 
 logger = logging.getLogger(__name__)
 
-NUTRIENTS: tuple[Nutrient, ...] = ("sugar", "fat", "fiber", "sodium", "protein")
+# Annex 4 的判据用到 saturated fat 与 energy(kJ)（8/23 按每份判饱和脂肪+钠，9 还要能量），
+# Day6 一并纳入抽取范围 —— 不抽就等于把 8/23/9 永久锁死在"证据不足 → 转人工"。
+NUTRIENTS: tuple[Nutrient, ...] = (
+    "sugar", "fat", "saturated_fat", "fiber", "sodium", "protein", "energy_kj",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -102,15 +106,64 @@ def _token_set(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(t) > 1}
 
 
-def _has_overlap(title: str, brand: str | None, product_name: str | None) -> bool:
-    """标题与 brand+product_name 有无重叠。
+def _discriminative_tokens(brand: str | None, product_name: str | None) -> set[str]:
+    """能证明"是同一个产品"的词 —— **类目词不算**。
+
+    `GENERIC_CATEGORY_WORDS` 里的 yoghurt / drink / milk 这类词，
+    全网每一个同类页面上都有。拿它们当"同一个产品"的判据，
+    竞品页（`Anchor Drinking Yoghurt 180ml`）和科普文
+    （`Greek Yoghurt Nutrition Facts`）会一起进候选池 ——
+    它们的营养面板是**真的**，只是**不是这个产品的**。
+    那比没有证据更糟：无证据会老实转人工，错证据会伪装成有据可依。
+
+    与 `search.is_generic` 用同一份词表、同一条理由（Day5 §3 规则 3）：
+    那边管"不许发泛查询"，这边管"不许收泛结果"。之前只做了前一半 ——
+    实测 `Kotmale Drinking Yoghurt` 的搜索结果里，
+    `Anchor Drinking Yoghurt` 只靠 "drinking"+"yoghurt" 就能过关。
+    """
+    brand_latin, _ = split_script(brand)
+    toks = _token_set(f"{brand_latin or ''} {product_name or ''}")
+    return {t for t in toks if t not in GENERIC_CATEGORY_WORDS}
+
+
+def _has_overlap(
+    title: str, brand: str | None, product_name: str | None, url: str = ""
+) -> bool:
+    """标题（或域名）与目标产品有没有**区分性**重叠。
 
     本土文字标题与英文查询词天然无重叠，这时改用拉丁部分再判一次，
     防止误杀 Daraz 这类本土电商页面（Day5 §5 阶段一）。
     """
-    want = _token_set(f"{brand or ''} {product_name or ''}")
+    brand_latin, brand_native = split_script(brand)
+    brand_toks = _token_set(brand_latin or "")
+
+    # **品牌已知 → 必须命中品牌。** 品名不参与判定。
+    #
+    # 为什么不靠"非类目词"凑：`GENERIC_CATEGORY_WORDS` 里有 "drink" 却没有
+    # "drinking"，于是 `Anchor Drinking Yoghurt` 靠一个 "drinking" 就过了关。
+    # 补词表是补不完的 —— 单复数、-ing、拼写变体（yogurt/yoghurt）没有尽头，
+    # 而漏一个的代价是竞品的营养面板被当成本产品的证据。
+    # 与 HFSS 那次同类：**别用一份必须穷举才成立的表当判据**。
+    # 品牌才是识别产品的那个词，就认它。
+    #
+    # 代价是品牌 OCR 认错时会全部落空 → `no_result` → 转人工。
+    # 那是老实的失败：宁可交给人，也不拿错产品的数字去裁定（纪律 #6）。
+    want = brand_toks or _discriminative_tokens(brand, product_name)
     if not want:
+        # 品牌未识别且品名全是类目词 —— 我们这边没有任何区分性信息，
+        # 判不了就别在这里拦，交给阶段二的 LLM（它至少能读懂页面内容）。
         return True
+
+    # 本土文字品牌直接出现在标题里也算命中（拉丁转写可能对不上）
+    if brand_native and brand_native in (title or ""):
+        return True
+
+    # 品牌自己的域名：标题可能只写 "Drinking Yoghurt"，不该因此误杀
+    host = re.sub(r"[^a-z0-9]", "", (url or "").lower().split("/")[2] if "//" in (url or "") else "")
+    brand_key = re.sub(r"[^a-z0-9]", "", (brand_latin or "").lower())
+    if brand_key and len(brand_key) > 2 and brand_key in host:
+        return True
+
     if _token_set(title) & want:
         return True
     latin_title, native_title = split_script(title)
@@ -138,7 +191,7 @@ def screen_candidates(
         if is_blacklisted(h.url):
             stats["blacklisted"] += 1
             continue
-        if not _has_overlap(h.title, brand, product_name):
+        if not _has_overlap(h.title, brand, product_name, h.url):
             stats["no_overlap"] += 1
             continue
         st = classify_source(h.url, brand, country)
@@ -206,6 +259,140 @@ def normalize(value: float, unit: str, serving_size_g: float | None = None) -> f
 
 
 # --------------------------------------------------------------------------- #
+# 每份口径 —— Annex 4 的 8/23（餐食）与 9（健康零食）按 per serve 判
+# --------------------------------------------------------------------------- #
+# 这一段是 Day6 新增。此前整条链路只有 per-100g 一个口径，
+# 于是 8/23/9 的官方判据在系统里**无法执行**：拿 per-100g 去比 "900mg /serve"
+# 是把两个不同分母的数字放在一起比，比出来的对错都是假的。
+# `nutrient_rules` 因此规定：份量不明就转人工，不许用 per-100g 顶替。
+KCAL_TO_KJ = 4.184
+
+_SERVING_PATTERNS = (
+    r"serving\s*size\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(g|ml)\b",
+    r"per\s*serve\s*\(?\s*(\d+(?:\.\d+)?)\s*(g|ml)\s*\)?",
+    r"per\s*serving\s*\(?\s*(\d+(?:\.\d+)?)\s*(g|ml)\s*\)?",
+    r"\(\s*(\d+(?:\.\d+)?)\s*(g|ml)\s*per\s*serv",
+    r"每份\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(克|g|毫升|ml)",
+)
+
+
+def parse_serving_size(text: str) -> float | None:
+    """从页面文本里读份量（g 或 ml，两者按 1:1 处理）。读不出返回 None —— 不猜。"""
+    t = (text or "").lower()
+    for pat in _SERVING_PATTERNS:
+        m = re.search(pat, t)
+        if m:
+            try:
+                v = float(m.group(1))
+            except ValueError:
+                continue
+            if 0 < v < 5000:            # 明显不合理的份量当没读到
+                return v
+    return None
+
+
+def basis_of(unit: str) -> str:
+    """把原始单位串归成 Basis 字面量：per_100g / per_100ml / per_serve / unknown。"""
+    u = (unit or "").strip().lower().replace(" ", "")
+    if "/100ml" in u or "per100ml" in u:
+        return "per_100ml"
+    if "/100g" in u or "per100g" in u:
+        return "per_100g"
+    if "serving" in u or "serve" in u or "portion" in u:
+        return "per_serve"
+    if re.search(r"/(\d+(?:\.\d+)?)(g|ml)\b|per(\d+(?:\.\d+)?)(g|ml)", u):
+        return "per_serve"          # 显式写了非 100 的分母，本质就是"每 N 克"
+    if not u or u in MASS_FACTOR or u.startswith(("kj", "kcal", "cal")):
+        return "unknown"
+    return "unknown"
+
+
+def to_kj(value: float, unit: str) -> float | None:
+    """能量统一到 kJ（Annex 4 的 9 用 kJ）。kcal 按 ×4.184 换算。"""
+    if value is None:
+        return None
+    u = (unit or "").strip().lower().replace(" ", "")
+    if u.startswith("kj"):
+        return round(value, 2)
+    if u.startswith(("kcal", "cal")):
+        return round(value * KCAL_TO_KJ, 2)
+    return None
+
+
+def per_serve_value(
+    value: float, unit: str, serving_size_g: float | None, normalized: float | None
+) -> float | None:
+    """算每份绝对量。两条路：单位本来就是每份 → 直接用；否则由 per-100g × 份量/100 推。
+
+    份量未知且单位不是每份 → None。**这是有意的**：宁可让 8/23/9 转人工，
+    也不拿一个分母不对的数字去卡 Annex 4 的线。
+    """
+    if value is None:
+        return None
+    u = (unit or "").strip().lower().replace(" ", "")
+
+    numerator = 1.0
+    for token, factor in MASS_FACTOR.items():
+        if u.startswith(token):
+            numerator = factor
+            break
+
+    if basis_of(unit) == "per_serve":
+        m = re.search(r"/(\d+(?:\.\d+)?)(g|ml)\b|per(\d+(?:\.\d+)?)(g|ml)", u)
+        if m and normalized is not None and serving_size_g:
+            # 单位写的是"每 N 克"而份量是另一个数：以份量为准，从 per-100g 推回去
+            return round(normalized * serving_size_g / 100.0, 4)
+        return round(value * numerator, 4)
+
+    if normalized is not None and serving_size_g and serving_size_g > 0:
+        return round(normalized * serving_size_g / 100.0, 4)
+    return None
+
+
+def _nutrient_value(
+    nutrient: Nutrient,
+    value: float,
+    unit: str,
+    *,
+    serving_size_g: float | None = None,
+    normalized: float | None = None,
+    confidence: float = 0.8,
+) -> NutrientValue:
+    """构造 NutrientValue，统一补齐 basis / normalized / per_serve / serving_size_g。
+
+    所有抽取路径（LLM / 规则 / 缓存回填）都必须走这里，
+    否则又会出现"某条路径忘了填 per_serve，8/23 静默失效"这种问题。
+    """
+    if nutrient == "energy_kj":
+        kj = to_kj(value, unit)
+        per_100 = kj if basis_of(unit) in ("per_100g", "per_100ml", "unknown") else None
+        if basis_of(unit) == "per_serve":
+            ps = kj
+        elif per_100 is not None and serving_size_g:
+            ps = round(per_100 * serving_size_g / 100.0, 2)
+        else:
+            ps = None
+        return NutrientValue(
+            nutrient=nutrient, value=value, unit=unit, basis=basis_of(unit),
+            normalized=per_100, per_serve=ps, serving_size_g=serving_size_g,
+            confidence=confidence,
+        )
+
+    if normalized is None:
+        normalized = normalize(value, unit, serving_size_g)
+    return NutrientValue(
+        nutrient=nutrient,
+        value=value,
+        unit=unit,
+        basis=basis_of(unit),
+        normalized=normalized,
+        per_serve=per_serve_value(value, unit, serving_size_g, normalized),
+        serving_size_g=serving_size_g,
+        confidence=confidence,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 阶段二 · 抽取
 # --------------------------------------------------------------------------- #
 EXTRACT_SYSTEM_PROMPT = """You are a nutrition fact extractor. Extract nutrition data for the
@@ -214,14 +401,21 @@ Rules:
 1. Extract ONLY values explicitly present in the snippet. Never guess or fill in missing nutrients.
 2. Keep the original unit as-is; also provide `normalized` in g/100g (solids) or g/100ml (liquids).
    If serving-size info is missing, set normalized to null.
-3. If a snippet is about a different product (same name, different variant or pack size with
+3. Report `serving_size_g` per item whenever the page states a serving/portion size
+   (e.g. "Serving size: 30g", "per serve (250ml)"). Set it to null if the page does not say.
+   This matters: some official cut-offs are defined PER SERVE, and without the serving size
+   the item cannot be judged at all.
+4. Extract `saturated_fat` and `energy_kj` when present — they are separate from total `fat`.
+   For energy, keep the original unit ("kJ" or "kcal"); do not convert.
+5. If a snippet is about a different product (same name, different variant or pack size with
    materially different values), return match=false for it.
-4. Snippets may mix English with Hindi/Bengali/Urdu/Sinhala/Tamil — extract from whichever
+6. Snippets may mix English with Hindi/Bengali/Urdu/Sinhala/Tamil — extract from whichever
    language carries the nutrition panel; do not translate values.
-5. Output strict JSON only.
+7. Output strict JSON only.
 
 JSON schema:
-{"items":[{"index":int,"match":bool,"nutrients":[{"nutrient":"sugar|fat|fiber|sodium|protein",
+{"items":[{"index":int,"match":bool,"serving_size_g":number|null,
+"nutrients":[{"nutrient":"sugar|fat|saturated_fat|fiber|sodium|protein|energy_kj",
 "value":number,"unit":string,"normalized":number|null,"confidence":number}]}]}"""
 
 
@@ -246,12 +440,19 @@ def _user_prompt(
 # 规则抽取用的正则（mock/离线兜底，adapter 打 mock-extract 会被 eval 双闸拦下）
 _NUM = r"([\d]+(?:[.,]\d+)?)"
 _UNIT = r"\s*(mg|g|µg|mcg)\b"
+_ENERGY_UNIT = r"\s*(kj|kcal|cal)\b"
 RULE_PATTERNS: dict[Nutrient, list[str]] = {
     "sugar": [rf"sugars?\D{{0,20}}{_NUM}{_UNIT}"],
+    # `fat` 必须排掉 saturated/trans，否则"saturated fat 6g"会被当成总脂肪读走
     "fat": [rf"(?<!saturated\s)(?<!trans\s)fat\D{{0,20}}{_NUM}{_UNIT}"],
+    "saturated_fat": [
+        rf"saturated\s*(?:fatty\s*acids?|fat)\D{{0,20}}{_NUM}{_UNIT}",
+        rf"\bsat\.?\s*fat\D{{0,20}}{_NUM}{_UNIT}",
+    ],
     "fiber": [rf"fib(?:re|er)\D{{0,20}}{_NUM}{_UNIT}"],
     "sodium": [rf"sodium\D{{0,20}}{_NUM}{_UNIT}", rf"salt\D{{0,20}}{_NUM}{_UNIT}"],
     "protein": [rf"protein\D{{0,20}}{_NUM}{_UNIT}"],
+    "energy_kj": [rf"energy\D{{0,20}}{_NUM}{_ENERGY_UNIT}"],
 }
 
 
@@ -274,6 +475,7 @@ def _basis_from_text(text: str) -> str:
 def rule_extract(hit: SearchHit) -> list[NutrientValue]:
     text = f"{hit.title}\n{hit.snippet}"
     basis = _basis_from_text(text)
+    serving = parse_serving_size(text)
     out: list[NutrientValue] = []
     for nutrient, pats in RULE_PATTERNS.items():
         for pat in pats:
@@ -286,12 +488,9 @@ def rule_extract(hit: SearchHit) -> list[NutrientValue]:
                 continue
             unit = f"{m.group(2).lower()}{basis}"
             out.append(
-                NutrientValue(
-                    nutrient=nutrient,
-                    value=value,
-                    unit=unit,
-                    normalized=normalize(value, unit),
-                    confidence=0.75,
+                _nutrient_value(
+                    nutrient, value, unit,
+                    serving_size_g=serving, confidence=0.75,
                 )
             )
             break
@@ -359,20 +558,25 @@ def _build_from_items(
         if not (0 <= idx < len(candidates)):
             continue
         hit, st = candidates[idx]
+        # 份量优先信模型抽的，抽不到再从原文正则兜一次 —— 缺它 8/23/9 就判不了
+        serving = item.get("serving_size_g")
+        try:
+            serving = float(serving) if serving is not None else None
+        except (TypeError, ValueError):
+            serving = None
+        if not serving or serving <= 0:
+            serving = parse_serving_size(f"{hit.title}\n{hit.snippet}")
+
         nutrients: list[NutrientValue] = []
         for nv in item.get("nutrients", []):
             if nv.get("nutrient") not in NUTRIENTS:
                 continue
             value, unit = float(nv["value"]), str(nv.get("unit", ""))
-            normalized = nv.get("normalized")
-            if normalized is None:
-                normalized = normalize(value, unit)
             nutrients.append(
-                NutrientValue(
-                    nutrient=nv["nutrient"],
-                    value=value,
-                    unit=unit,
-                    normalized=normalized,
+                _nutrient_value(
+                    nv["nutrient"], value, unit,
+                    serving_size_g=serving,
+                    normalized=nv.get("normalized"),
                     confidence=float(nv.get("confidence", 0.8)),
                 )
             )
@@ -489,10 +693,20 @@ def summarize(evidence: list[Evidence]) -> str:
         return "无证据"
     if all(e.is_degraded for e in evidence):
         return f"{len(evidence)} 条降级证据（无营养面板）"
-    labels = {"sugar": "糖", "fat": "脂肪", "fiber": "纤维", "sodium": "钠", "protein": "蛋白"}
+    labels = {
+        "sugar": "糖", "fat": "脂肪", "saturated_fat": "饱和脂肪", "fiber": "纤维",
+        "sodium": "钠", "protein": "蛋白", "energy_kj": "能量",
+    }
     parts: list[str] = []
     for n in NUTRIENTS:
         v = next((e.get(n) for e in evidence if e.get(n) is not None), None)
         if v is not None:
-            parts.append(f"{labels[n]} {v}g/100")
+            unit = "kJ/100" if n == "energy_kj" else "g/100"
+            parts.append(f"{labels[n]} {v}{unit}")
+    # per-serve 是 Annex 4 判 8/23/9 的口径，摘要里必须能看到有没有份量
+    serve = next(
+        (nv.serving_size_g for e in evidence for nv in e.nutrients if nv.serving_size_g),
+        None,
+    )
+    parts.append(f"份量 {serve}g" if serve else "份量未知（8/23/9 判不了）")
     return "、".join(parts) or "未抽到可用 normalized 值"

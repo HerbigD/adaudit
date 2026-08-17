@@ -134,13 +134,16 @@ async def run_one(image: str, tag: str = "real") -> dict:
         },
         "adapters": sorted({s["adapter"] for s in trace if s.get("adapter")}),
     }
+    # 账本前后差作为交叉校验：收集器要是漏了，这里能看出来
+    summary["cost"]["ledger_delta"] = after["total_tokens"] - before["total_tokens"]
 
     print(f"\n  route: {summary['route_1']} → {summary['route_2']} "
           f"| search={summary['search_status']} | {elapsed:.1f}s")
     print(f"  final: {(final.label() if final else None)}")
     print(f"  evidence: {len(evidence)} 条，真实 URL {len(summary['real_source_urls'])} 个")
     print(f"  cost: {summary['cost']['tokens_total']} tokens ≈ "
-          f"{summary['cost']['estimated']} {settings.cost_currency}（{u.calls} 次调用）")
+          f"{summary['cost']['estimated']} {settings.cost_currency}（{u.calls} 次调用）"
+          f"｜账本增量 {summary['cost']['ledger_delta']}")
 
     dump(f"real_run_{tag}_{audit_id[:8]}.json", summary)
     dump(f"evidence_{tag}_{audit_id[:8]}.json", evidence)
@@ -230,14 +233,27 @@ async def fuse_test() -> dict:
             refused, err = True, str(exc)
         except Exception as exc:  # noqa: BLE001
             wrong = f"{type(exc).__name__}: {exc}"
+        # mock provider 在熔断之前就抛 VLMError —— 那不是"熔断失效"，
+        # 而是"这一态根本测不了熔断"。原来一律报 FAIL，会让人在 mock 下
+        # 误以为熔断坏了，然后去改一段本来没问题的代码。
+        is_mock = settings.llm_provider == "mock" or settings.app_env == "mock"
+        if refused:
+            verdict = "PASS 熔断生效：真实调用在发出前被拒"
+        elif is_mock and wrong:
+            verdict = (
+                f"SKIP mock 模式下测不了熔断（provider 在熔断前先抛了 {wrong}）。"
+                f"请在 LLM_PROVIDER=qwen 下重跑本项。"
+            )
+        else:
+            verdict = f"FAIL 未被熔断拦住（{wrong or '调用居然成功了'}）"
         out = {
             "budget_forced_to": 1,
             "ledger": before,
+            "provider": settings.llm_provider,
             "refused": refused,
             "refusal_message": err,
             "unexpected_error": wrong,
-            "verdict": "PASS 熔断生效：真实调用在发出前被拒" if refused
-                       else f"FAIL 未被熔断拦住（{wrong or '调用居然成功了'}）",
+            "verdict": verdict,
         }
     finally:
         settings.daily_token_budget, settings.usage_path = orig_budget, orig_path
@@ -255,7 +271,18 @@ async def main() -> None:
     ap.add_argument("--confusion", help="混淆对图片所在目录")
     ap.add_argument("--fuse-test", action="store_true")
     ap.add_argument("--skip-guard", action="store_true", help="跳过真实配置自检")
+    ap.add_argument(
+        "--force-search",
+        action="store_true",
+        help="把 DIRECT_THRESHOLD 临时抬到 1.01，逼任何图都走慢路径 —— "
+             "用来在高置信样本上也能拿到取证链路的验收证据",
+    )
     args = ap.parse_args()
+
+    if args.force_search:
+        settings.direct_threshold = 1.01
+        print("⚠️  --force-search：DIRECT_THRESHOLD 临时抬到 1.01，本次所有图都会走取证路径\n"
+              "   （只影响本次进程，不写回 .env）")
 
     if not args.skip_guard:
         guard_real()          # 熔断实调也要在真实配置下做，否则拦住的只是 mock

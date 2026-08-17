@@ -7,6 +7,8 @@ data/usage.json
 data/usage.lock
 data/usage.tmp
 data/day6/
+data/smoke_confusion/
+data/smoke_ocr/
 !data/.gitkeep
 
 # Python
@@ -33,3 +35,4 @@ next-env.d.ts
 .DS_Store
 .vscode/
 .idea/
+_to_delete/

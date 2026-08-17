@@ -31,7 +31,10 @@ async def feedback_ingest(state: AuditState) -> dict:
 
         # 1) eval 集 + 2) few-shot 修正记忆（同一次调用写两处）
         rejected = revised if state.get("human_choice") == "original" else initial
-        memory.remember(state.get("ad_image", ""), final, rejected=rejected)
+        sample_id = memory.remember(
+            state.get("ad_image", ""), final, rejected=rejected,
+            audit_id=state.get("audit_id"),      # 幂等键：重复回流只留一行
+        )
         wrote += ["eval 集", "修正记忆库"]
 
         # 3) 产品知识缓存库：人工裁定优先级最高，覆盖同产品的 auto 档案
@@ -49,7 +52,13 @@ async def feedback_ingest(state: AuditState) -> dict:
                 )
                 wrote.append(f"产品缓存库（{cache_result['action']}）")
 
-        t.extra = {"cache_write": cache_result, "human_choice": state.get("human_choice")}
+        t.extra = {
+            "cache_write": cache_result,
+            "human_choice": state.get("human_choice"),
+            # 三处写入各留一个可查的凭据，验收时不用去猜"到底写没写"
+            "eval_sample_id": sample_id,
+            "memory_vector_id": state.get("audit_id") or sample_id,
+        }
         t.summary = "已回流：" + " + ".join(wrote)
         await events.emit_log("feedback_ingest", t.summary)
         return {"trace": [t]}

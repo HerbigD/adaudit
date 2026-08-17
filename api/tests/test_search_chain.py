@@ -409,3 +409,64 @@ def test_status_conflict_wins_over_everything():
     from graph.nodes.web_search import decide_status
 
     assert decide_status([ev({"fat": 1.2})], True, 1, [5, 19]) == "conflict"
+
+# --------------------------------------------------------------------------- #
+# 候选筛选：竞品页不许进证据池（2026-08-01 实测发现）
+# --------------------------------------------------------------------------- #
+def test_screening_requires_the_brand_not_just_category_words():
+    """`Anchor Drinking Yoghurt` 不许作为 `Kotmale Drinking Yoghurt` 的证据。
+
+    ## 这个缺陷长什么样
+
+    第一版筛选是"标题与 brand+product_name 有无 token 重叠"。
+    实测搜 `Kotmale Drinking Yoghurt nutrition facts`，百炼返回的是
+    希腊酸奶科普文和 Oatly 燕麦奶 —— 那两条恰好因为拼写差异
+    （yogurt≠yoghurt、drink≠drinking）被挡住了，**是运气不是设计**。
+
+    真正危险的是竞品页：`Anchor Drinking Yoghurt 180ml` 靠
+    "drinking"+"yoghurt" 两个类目词就能过关，而它**有真实的营养面板**。
+    抽出来的数字是真的，只是不是这个产品的 —— 那比没有证据更糟：
+    没有证据会老实转人工，错证据会伪装成有据可依（纪律 #6 同类）。
+
+    ## 为什么判据是"必须命中品牌"而不是"非类目词重叠"
+
+    第二版试过用 `GENERIC_CATEGORY_WORDS` 剔掉类目词，结果发现表里有
+    "drink" 却没有 "drinking"，竞品页照样过。单复数、-ing、拼写变体
+    没有尽头 —— **不要拿一份必须穷举才成立的表当判据**（HFSS 正则那次同款）。
+    品牌才是识别产品的那个词。
+    """
+    from services.nutrition import screen_candidates
+    from services.search import SearchHit
+
+    hits = [
+        SearchHit("https://www.alibaba.com/a.html",
+                  "How To Choose Greek Yogurt With Highest Protein", ""),
+        SearchHit("https://www.oatly.com/en-ie/products/x", "Oat Drink No Sugars", ""),
+        SearchHit("https://daraz.lk/p/anchor", "Anchor Drinking Yoghurt 180ml | Daraz", ""),
+        SearchHit("https://daraz.lk/p/kotmale", "Kotmale Drinking Yoghurt 180ml", ""),
+    ]
+    out, stats = screen_candidates(
+        hits, brand="Kotmale", product_name="Drinking Yoghurt", country="LK"
+    )
+    assert [h.title for h, _ in out] == ["Kotmale Drinking Yoghurt 180ml"], stats
+    assert stats["no_overlap"] == 3
+
+
+def test_screening_keeps_official_pages_whose_title_omits_the_brand():
+    """品牌官网上的页面标题常常只写品名 —— 靠域名认出来，别误杀。"""
+    from services.nutrition import screen_candidates
+    from services.search import SearchHit
+
+    out, _ = screen_candidates(
+        [SearchHit("https://www.kotmale.lk/products/drinking-yoghurt", "Drinking Yoghurt", "")],
+        brand="Kotmale", product_name="Drinking Yoghurt", country="LK",
+    )
+    assert len(out) == 1
+
+
+def test_screening_falls_back_to_product_name_when_brand_is_unknown():
+    """品牌没认出来时才拿品名的非类目词兜底 —— 但仍然挡掉纯类目词重叠。"""
+    from services.nutrition import _has_overlap
+
+    assert _has_overlap("Milo Energy Drink 180ml", None, "Milo Energy Drink", "https://x.lk/p")
+    assert not _has_overlap("Anchor Drinking Yoghurt", None, "Milo Energy Drink", "https://x.lk/p")

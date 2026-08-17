@@ -12,6 +12,9 @@ export type SSEEvent =
       status: string;
       summary: string;
       fallback_reason: string | null;
+      /** 后端 StepTrace.extra 原样透传。时间线靠它区分"缓存命中跳过搜索"与"正在搜索"，
+       *  而不是去 summary 文案里找关键词。 */
+      extra?: Record<string, unknown>;
     }
   | { type: "classified"; initial: Classification | null; route_1?: string }
   | {

@@ -1,0 +1,28 @@
+id,image_path,gold_specific,gold_code_raw,country,language,language_raw
+1593145091332,Sri Lanka/1593145091332.jpg,38,38,LK,local_only,sinhala tamil
+1597145593578,Sri Lanka/1597145593578.jpg,38,38,LK,en_only,english
+1597384465363,Sri Lanka/1597384465363.jpg,38,38,LK,mixed,sinhala english
+1597814739365,Sri Lanka/1597814739365.jpg,38,38,LK,mixed,sinhala english
+1597818817446,Sri Lanka/1597818817446.jpg,38,38,LK,mixed,sinhala english
+1598328870153,Sri Lanka/1598328870153.jpg,38,38,LK,mixed,sinhala tamil english
+1598331994746,Sri Lanka/1598331994746.jpg,38,38,LK,mixed,sinhala english
+1598336374680,Sri Lanka/1598336374680.jpg,38,38,LK,mixed,sinhala english|sinhala tamil english
+1599026101030,Sri Lanka/1599026101030.jpg,38,38,LK,mixed,Sinhala English
+1600840202955,Sri Lanka/1600840202955.jpg,38,38,LK,en_only,english
+1604555908731,India/1604555908731.jpg,35,35,IN,na,Not Applicable (NA)
+1611648571138,Bangladesh/1611648571138.jpg,35,35,BD,na,Not Applicable (NA)
+1613447748888,Sri Lanka/1613447748888.jpg,38,38,LK,local_only,tamil
+1627532561849,Pakistan/1627532561849.jpg,36,36,PK,en_only,English Not Applicable (NA)
+1627618338791,Pakistan/1627618338791.jpg,36,36,PK,na,Not Applicable (NA)
+1627793364283,Pakistan/1627793364283.jpg,35,35,PK,en_only,English
+1627883862945,Pakistan/1627883862945.jpg,35,35,PK,na,Not Applicable (NA)
+1643099345373,SL cleaned Images/1643099345373.jpg,38,38,LK,mixed,sinhala tamil english
+1643102521609,SL cleaned Images/1643102521609.jpg,38,38,LK,mixed,sinhala english
+1643177678792,SL cleaned Images/1643177678792.jpg,38,38,LK,mixed,Sinhala English
+1644293594378,SL cleaned Images/1644293594378.jpg,38,38,LK,mixed,Sinhala English
+1644994086343,SL cleaned Images/1644994086343.jpg,38,38,LK,mixed,Sinhala English
+16624479447874644507141049650907-12_35_57,India/16624479447874644507141049650907-12_35_57.jpg,36,36,IN,na,Not Applicable (NA)
+16631349439183840741080800953475-11_25_58,India/16631349439183840741080800953475-11_25_58.jpg,36,36,IN,en_only,English
+16631355901443806980694211515735-11_36_39,India/16631355901443806980694211515735-11_36_39.jpg,36,36,IN,en_only,English
+IMG_20220830_102645-10_27_35,India/IMG_20220830_102645-10_27_35.jpg,36,36,IN,na,Not Applicable (NA)
+image-10_41_29,India/image-10_41_29.jpg,36,36,IN,en_only,English

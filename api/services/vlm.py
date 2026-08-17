@@ -193,7 +193,11 @@ class MockVLM(BaseVLM):
         stem = Path(image_path).stem.lower()
         rng = random.Random(stem)
 
-        # 优先从混淆对里挑，保证 mock 数据能打到 eval 关注的那几对
+        # 优先从混淆对里挑，保证 mock 数据能打到 eval 关注的那几对。
+        # 但**品名一旦写死就必须配套写死混淆对** —— 下面几个分支都这么做了。
+        # 教训：曾经让 "Mock Cereal 500g" 随机落到 (7,24)（咸味酱 vs 高脂酱），
+        # 于是裁决按 Annex 4 的酱类阈值去判一盒麦片，规则正确地拒绝判定，
+        # 测试却红了。假数据自相矛盾时，红的是测试，不是被测代码。
         pair = rng.choice(list(tx.confusing_pairs))
         code = pair[0]
         gid = tx.specifics[code].parent_id
@@ -213,12 +217,15 @@ class MockVLM(BaseVLM):
         elif "serving" in stem:
             spec, gen, ident = 0.55, 0.86, True
             brand, pname = "ServingBrand", "Morning Cereal 375g"
+            code, gid, pair = 2, 1, (2, 12)
         elif "parent" in stem:
             spec, gen, ident = 0.48, 0.93, True
             brand, pname = "MockBrand", "Mock Cereal 500g"
+            code, gid, pair = 2, 1, (2, 12)          # 麦片就得落在谷物对上
         elif "low" in stem:
             spec, gen, ident = 0.55, 0.85, True
             brand, pname = "MockBrand", "Mock Crunchy Cereal 500g"
+            code, gid, pair = 2, 1, (2, 12)
         else:
             spec, gen, ident = 0.93, 0.97, True
             brand, pname = "MockBrand", "Mock Product"
@@ -289,6 +296,22 @@ def json_mode_state() -> dict[str, bool]:
     return dict(_JSON_MODE_SUPPORTED)
 
 
+# OpenAI 兼容协议的硬性要求：用 json_object 模式时，messages 里必须出现 "json" 字样。
+# 这条**不是**"模型不支持 JSON mode"，是我们自己 prompt 写漏了 —— 必须区别对待，
+# 否则一次可修复的 400 会被误记成"该模型永久不支持"，白丢一层结构化保障。
+_JSON_WORD_REQUIRED = re.compile(r"must contain the word ['\"]?json", re.I)
+
+
+def _ensure_json_word(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """保证 messages 里出现 "json" 字样。已有则原样返回。"""
+    blob = json.dumps(messages, ensure_ascii=False).lower()
+    if "json" in blob:
+        return messages
+    return messages + [
+        {"role": "system", "content": "Respond with a single valid JSON object."}
+    ]
+
+
 async def dashscope_chat(
     messages: list[dict[str, Any]],
     *,
@@ -317,6 +340,9 @@ async def dashscope_chat(
     key = f"{settings.dashscope_base_url}|{model}"
     use_json = want_json and settings.qwen_json_mode != "off" and _JSON_MODE_SUPPORTED.get(key, True)
 
+    if use_json:
+        messages = _ensure_json_word(messages)
+
     def build(with_json: bool) -> dict[str, Any]:
         p: dict[str, Any] = {
             "model": model,
@@ -339,11 +365,21 @@ async def dashscope_chat(
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(url, json=build(use_json), headers=headers)
         if r.status_code == 400 and use_json:
-            # JSON mode 不被该模型支持 —— 记住，改走 prompt 契约 + 运行时校验
-            logger.warning("模型 %s 拒绝 response_format，降级到 prompt 契约：%s",
-                           model, r.text[:200])
-            _JSON_MODE_SUPPORTED[key] = False
-            r = await client.post(url, json=build(False), headers=headers)
+            if _JSON_WORD_REQUIRED.search(r.text):
+                # 是我们自己的 prompt 漏了 "json" 字样，**不是**模型不支持 —— 补上重试
+                logger.info("补 'json' 字样后重试 json_object 模式")
+                messages = messages + [
+                    {"role": "system", "content": "Respond with a single valid JSON object."}
+                ]
+                r = await client.post(url, json=build(True), headers=headers)
+                if r.status_code < 400:
+                    _JSON_MODE_SUPPORTED[key] = True
+            if r.status_code == 400:
+                # 到这里才是真不支持：记住并降级到 prompt 契约 + 运行时校验
+                logger.warning("模型 %s 拒绝 response_format，降级到 prompt 契约：%s",
+                               model, r.text[:200])
+                _JSON_MODE_SUPPORTED[key] = False
+                r = await client.post(url, json=build(False), headers=headers)
         elif use_json and r.status_code < 400:
             _JSON_MODE_SUPPORTED.setdefault(key, True)
         if r.status_code >= 400:
@@ -353,6 +389,84 @@ async def dashscope_chat(
     u = data.get("usage") or {}
     usage.record(model, u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
     return data["choices"][0]["message"].get("content") or "", data
+
+
+def _native_generation_url() -> str:
+    """把 OpenAI 兼容 base_url 换算成原生协议的 generation 端点。
+
+    国际站与内地站只差域名，所以从配置里取域名而不是再加一个配置项 ——
+    两个 URL 各配一份，迟早会出现"改了一个忘了另一个"。
+    """
+    from urllib.parse import urlparse
+
+    u = urlparse(settings.dashscope_base_url)
+    return f"{u.scheme}://{u.netloc}/api/v1/services/aigc/text-generation/generation"
+
+
+async def dashscope_generate(
+    messages: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    enable_search: bool = False,
+    search_options: dict[str, Any] | None = None,
+    timeout: float = 90.0,
+) -> tuple[str, dict[str, Any]]:
+    """百炼**原生**协议。返回 (文本, 原始响应)。
+
+    ## 为什么非要多一条协议
+
+    官方能力对比表写得很清楚：**OpenAI 兼容协议（Chat Completions 与 Responses）
+    都「不支持返回搜索来源」**，只有原生协议会返回 `output.search_info`。
+
+    而我们的取证链路把 `search_info.search_results` 当作 URL 的**唯一**可信来源
+    （正文里模型自己写的 URL 会编，一律丢弃）。所以走兼容协议时，
+    联网即使真的发生了，我们也永远拿不到来源 —— 表现就是每条查询 0 结果、
+    不报错、还照常计费。实测 5 种参数组合 × 2 个模型全军覆没，就是这个原因。
+
+    这不是"多一种写法"，是取证链路能不能工作的前提。
+
+    请求/响应形状与兼容协议不同：入参裹在 `input`/`parameters` 里，
+    出参在 `output.choices[0].message.content`，记账字段是
+    `usage.input_tokens/output_tokens`（兼容协议是 prompt_tokens/completion_tokens）。
+    """
+    import httpx
+
+    model = model or settings.qwen_model
+    usage.guard(model)                     # 熔断仍是最外层的闸，与兼容协议同一条纪律
+    if not settings.dashscope_api_key:
+        raise VLMError("缺少 DASHSCOPE_API_KEY")
+    usage.note_model(model)
+
+    body: dict[str, Any] = {
+        "model": model,
+        "input": {"messages": messages},
+        "parameters": {"result_format": "message", "temperature": 0.0},
+    }
+    if enable_search:
+        body["parameters"]["enable_search"] = True
+        body["parameters"]["search_options"] = search_options or {
+            "enable_source": True,          # ← 没有它就不返回 search_info
+            "forced_search": True,
+            "search_strategy": settings.search_strategy,
+        }
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(
+            _native_generation_url(),
+            json=body,
+            headers={"Authorization": f"Bearer {settings.dashscope_api_key}"},
+        )
+    if r.status_code >= 400:
+        raise VLMError(f"DashScope(native) {r.status_code}: {r.text[:400]}")
+    data = r.json()
+
+    u = data.get("usage") or {}
+    usage.record(model, u.get("input_tokens", 0), u.get("output_tokens", 0))
+
+    out = data.get("output") or {}
+    choices = out.get("choices") or []
+    text = ((choices[0].get("message") or {}).get("content") if choices else out.get("text")) or ""
+    return text, data
 
 
 class QwenVLM(BaseVLM):
@@ -484,7 +598,8 @@ async def probe_model() -> dict[str, Any]:
     out: dict[str, Any] = {"provider": settings.vlm_provider, "model": model}
     try:
         text, raw = await dashscope_chat(
-            [{"role": "user", "content": 'Reply with exactly {"ok":true}'}],
+            [{"role": "user",
+              "content": 'Reply with exactly this JSON object and nothing else: {"ok":true}'}],
             model=model, want_json=True, timeout=30,
         )
         out.update(reachable=True, sample=text[:80],

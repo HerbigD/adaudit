@@ -172,12 +172,18 @@ class Collected:
     models: list[str] = field(default_factory=list)
 
 
-_CTX: contextvars.ContextVar[Collected | None] = contextvars.ContextVar("usage_ctx", default=None)
+# **栈**而不是单个槽：collect() 会嵌套（脚本收整轮、节点各收自己那一段），
+# 只留一个槽的话内层会把外层顶掉，外层永远收到 0。
+# 用 tuple 存活跃收集器，每次记账**逐个**加上去。
+# 跨 asyncio 任务也成立：子任务拿到的是父 context 的拷贝，但 Collected 对象是同一个，
+# 所以 LangGraph 把节点放进独立 task 跑，外层依然收得到。
+_CTX: contextvars.ContextVar[tuple[Collected, ...]] = contextvars.ContextVar(
+    "usage_ctx", default=()
+)
 
 
 def _bump_ctx(tokens_in: int, tokens_out: int, cost: float) -> None:
-    c = _CTX.get()
-    if c is not None:
+    for c in _CTX.get():
         c.tokens_in += tokens_in
         c.tokens_out += tokens_out
         c.cost = round(c.cost + cost, 6)
@@ -186,9 +192,9 @@ def _bump_ctx(tokens_in: int, tokens_out: int, cost: float) -> None:
 
 @contextmanager
 def collect() -> Iterator[Collected]:
-    """归集这一段代码里发生的全部真实调用用量（contextvar，asyncio 安全）。"""
+    """归集这一段代码里发生的全部真实调用用量（可嵌套，asyncio 安全）。"""
     c = Collected()
-    token = _CTX.set(c)
+    token = _CTX.set(_CTX.get() + (c,))
     try:
         yield c
     finally:
@@ -196,9 +202,9 @@ def collect() -> Iterator[Collected]:
 
 
 def note_model(model: str) -> None:
-    c = _CTX.get()
-    if c is not None and model not in c.models:
-        c.models.append(model)
+    for c in _CTX.get():
+        if model not in c.models:
+            c.models.append(model)
 
 
 # --------------------------------------------------------------------------- #

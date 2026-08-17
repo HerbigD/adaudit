@@ -21,6 +21,41 @@ class Sample:
     gold_general: str
     source: str = "manual_label"
     is_confusing_pair: bool = False
+    # A2 切分带来的字段：金标侧的国家/语言（D3 切片要用金标而不是模型判读），
+    # 以及这条属于哪一份切分 —— 指标输出里必须能看到它是 dev 还是 eval。
+    country: str | None = None
+    language: str | None = None
+    split: str | None = None
+
+
+def from_split(
+    name: str, limit: int | None = None, only_confusing: bool = False
+) -> list[Sample]:
+    """从 A2 的切分 csv 读样本（`data/splits/{dev,eval,smoke}.csv`）。
+
+    **这是跑批的正路**。`load()` 直读 `eval_samples` 表，那张表里没有切分概念，
+    W7 出终版指标时用它就等于又在全集上跑，A2 的隔离白做。
+    """
+    from eval import split as split_mod
+
+    rows = split_mod.load_split(name)
+    out = [
+        Sample(
+            id=r.id,
+            image_path=r.image_path,
+            gold_specific=r.gold_specific,
+            gold_general=taxonomy.general_of(r.gold_specific),
+            source="split",
+            is_confusing_pair=any(r.gold_specific in p for p in taxonomy.confusing_pairs()),
+            country=r.country,
+            language=r.language,
+            split=name,
+        )
+        for r in rows
+    ]
+    if only_confusing:
+        out = [s for s in out if s.is_confusing_pair]
+    return out[:limit] if limit else out
 
 
 def import_csv(path: str | Path, source: str = "manual_label") -> int:
